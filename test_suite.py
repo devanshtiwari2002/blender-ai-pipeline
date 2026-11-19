@@ -9,6 +9,7 @@ import json
 import queue
 import threading
 import time
+import math
 
 # Ensure project root is on sys.path
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -103,6 +104,100 @@ def test_action_validation():
         "depth": 4.0
     })
     assert ok and acts[0]["dimensions"] == [8.0, 4.0]
+
+    # 5. Group 3A: Planar set_dimensions and apply_transform validation
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_dimensions",
+        "name": "Ground",
+        "dimensions": [4.0, 3.0, 0.0]
+    })
+    assert ok, f"Planar dimensions failed: {err}"
+    assert acts[0]["dimensions"] == [4.0, 3.0, 0.0]
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "apply_transform",
+        "name": "Box",
+        "scale": True,
+        "rotation": False,
+        "location": False
+    })
+    assert ok, f"apply_transform validation failed: {err}"
+
+    # 6. Group 3B-1: Modifier validation (add_bevel with modifier_name, segment boundaries)
+    ok, err, acts = action_validator.validate_payload({
+        "action": "add_bevel",
+        "name": "Box",
+        "width": 0.05,
+        "segments": 1,
+        "modifier_name": "CustomBevel"
+    })
+    assert ok, f"add_bevel valid validation failed: {err}"
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "add_bevel",
+        "name": "Box",
+        "segments": 128
+    })
+    assert ok, f"add_bevel segments=128 failed: {err}"
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_shade_smooth",
+        "name": "Box",
+        "smooth": True
+    })
+    assert ok, f"set_shade_smooth validation failed: {err}"
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "apply_modifier",
+        "name": "Box",
+        "modifier_name": "CustomBevel"
+    })
+    assert ok, f"apply_modifier validation failed: {err}"
+
+    # 7. Group 3B-2: Surface Quality validation (add_bevel limit_method, angle_limit, harden_normals; set_shade_smooth auto_smooth, angle)
+    ok, err, acts = action_validator.validate_payload({
+        "action": "add_bevel",
+        "name": "Box",
+        "limit_method": "angle",
+        "angle_limit": 45.0,
+        "harden_normals": True
+    })
+    assert ok, f"add_bevel angle validation failed: {err}"
+    assert acts[0]["limit_method"] == "ANGLE", "limit_method must be normalized to uppercase"
+    assert acts[0]["angle_limit"] == 45.0
+    assert acts[0]["harden_normals"] is True
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "add_bevel",
+        "name": "Box",
+        "limit_method": "  none  ",
+        "harden_normals": False
+    })
+    assert ok, f"add_bevel none validation failed: {err}"
+    assert acts[0]["limit_method"] == "NONE", "limit_method must be normalized to uppercase"
+    assert acts[0]["harden_normals"] is False
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_shade_smooth",
+        "name": "Box",
+        "smooth": True,
+        "auto_smooth": True,
+        "angle": 45.0
+    })
+    assert ok, f"set_shade_smooth auto_smooth validation failed: {err}"
+    assert acts[0]["smooth"] is True
+    assert acts[0]["auto_smooth"] is True
+    assert acts[0]["angle"] == 45.0
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_shade_smooth",
+        "name": "Box",
+        "smooth": False,
+        "auto_smooth": False
+    })
+    assert ok, f"set_shade_smooth flat validation failed: {err}"
+    assert acts[0]["smooth"] is False
+    assert acts[0]["auto_smooth"] is False
 
     print("  [PASSED] All action validation tests passed.")
 
@@ -262,6 +357,232 @@ def test_invalid_requests():
     huge_payload = [{"action": "clear_scene"}] * (action_validator.MAX_ACTIONS_PER_REQUEST + 1)
     ok, err, _ = action_validator.validate_payload(huge_payload)
     assert not ok and "exceeds maximum allowed actions" in err
+
+    # 15. Group 3A: Scale validation tests
+    # Zero scale
+    ok, err, _ = action_validator.validate_payload({"action": "set_scale", "name": "Box", "scale": [1.0, 0.0, 1.0]})
+    assert not ok and "strictly positive" in err
+
+    # Negative scale
+    ok, err, _ = action_validator.validate_payload({"action": "set_scale", "name": "Box", "scale": [-1.0, 1.0, 1.0]})
+    assert not ok and "strictly positive" in err
+
+    # Boolean in scale
+    ok, err, _ = action_validator.validate_payload({"action": "set_scale", "name": "Box", "scale": [1.0, True, 1.0]})
+    assert not ok and ("strictly positive" in err or "finite numbers" in err)
+
+    # NaN / Inf in scale
+    import math
+    ok, err, _ = action_validator.validate_payload({"action": "set_scale", "name": "Box", "scale": [float("nan"), 1.0, 1.0]})
+    assert not ok and ("strictly positive" in err or "finite numbers" in err)
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_scale", "name": "Box", "scale": [1.0, float("inf"), 1.0]})
+    assert not ok and ("strictly positive" in err or "finite numbers" in err)
+
+    # Invalid scale array
+    ok, err, _ = action_validator.validate_payload({"action": "set_scale", "name": "Box", "scale": [1.0, 2.0]})
+    assert not ok and "must be a list/tuple of 3 numbers" in err
+
+    # 16. Group 3A: Dimensions validation tests
+    # All zero dimensions
+    ok, err, _ = action_validator.validate_payload({"action": "set_dimensions", "name": "Box", "dimensions": [0.0, 0.0, 0.0]})
+    assert not ok and ("At most one dimension" in err or "strictly positive" in err or "non-negative" in err)
+
+    # Multiple zero dimensions (line)
+    ok, err, _ = action_validator.validate_payload({"action": "set_dimensions", "name": "Box", "dimensions": [0.0, 0.0, 5.0]})
+    assert not ok and "At most one dimension" in err
+
+    # Negative dimensions
+    ok, err, _ = action_validator.validate_payload({"action": "set_dimensions", "name": "Box", "dimensions": [4.0, -3.0, 0.0]})
+    assert not ok and "non-negative" in err
+
+    # Boolean in dimensions
+    ok, err, _ = action_validator.validate_payload({"action": "set_dimensions", "name": "Box", "dimensions": [4.0, True, 0.0]})
+    assert not ok and ("non-negative" in err or "finite numbers" in err)
+
+    # NaN in dimensions
+    ok, err, _ = action_validator.validate_payload({"action": "set_dimensions", "name": "Box", "dimensions": [float("nan"), 3.0, 0.0]})
+    assert not ok and ("non-negative" in err or "finite numbers" in err)
+
+    # 17. Group 3A: apply_transform validation tests
+    # Missing name
+    ok, err, _ = action_validator.validate_payload({"action": "apply_transform", "scale": True})
+    assert not ok and "valid 'name'" in err
+
+    # Non-boolean flags
+    ok, err, _ = action_validator.validate_payload({"action": "apply_transform", "name": "Box", "scale": "yes"})
+    assert not ok and "must be a boolean" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "apply_transform", "name": "Box", "location": 1})
+    assert not ok and "must be a boolean" in err
+
+    # All false
+    ok, err, _ = action_validator.validate_payload({"action": "apply_transform", "name": "Box", "location": False, "rotation": False, "scale": False})
+    assert not ok and "at least one of" in err
+
+    # Unrecognized parameter
+    ok, err, _ = action_validator.validate_payload({"action": "apply_transform", "name": "Box", "unknown_opt": True})
+    assert not ok and "Unrecognized parameter 'unknown_opt'" in err
+
+    # 18. Group 3B-1: Modifier validation tests
+    # add_bevel width tests
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "width": 0.0})
+    assert not ok and "strictly positive" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "width": -0.1})
+    assert not ok and "strictly positive" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "width": True})
+    assert not ok and "strictly positive" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "width": float("nan")})
+    assert not ok and "strictly positive" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "width": float("inf")})
+    assert not ok and "strictly positive" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "width": "0.1"})
+    assert not ok and "strictly positive" in err
+
+    # add_bevel segments tests
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "segments": 0})
+    assert not ok and "between 1 and 128" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "segments": -1})
+    assert not ok and "between 1 and 128" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "segments": 3.5})
+    assert not ok and "must be an integer" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "segments": True})
+    assert not ok and "must be an integer" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "segments": "3"})
+    assert not ok and "must be an integer" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "segments": 129})
+    assert not ok and "between 1 and 128" in err
+
+    # add_bevel modifier_name tests
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "modifier_name": ""})
+    assert not ok and "non-empty string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "modifier_name": 123})
+    assert not ok and "non-empty string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "modifier_name": True})
+    assert not ok and "non-empty string" in err
+
+    # add_bevel unknown keys and missing name
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "unknown_key": 1})
+    assert not ok and "Unrecognized parameter 'unknown_key'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "   "})
+    assert not ok and "valid non-empty 'name'" in err
+
+    # apply_modifier tests
+    ok, err, _ = action_validator.validate_payload({"action": "apply_modifier", "name": "Box", "modifier_name": ""})
+    assert not ok and "non-empty string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "apply_modifier", "name": "Box", "modifier_name": 123})
+    assert not ok and "non-empty string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "apply_modifier", "name": "Box", "unknown_key": 1})
+    assert not ok and "Unrecognized parameter 'unknown_key'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "apply_modifier", "name": ""})
+    assert not ok and "valid non-empty 'name'" in err
+
+    # set_shade_smooth tests
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "smooth": "yes"})
+    assert not ok and "must be a boolean" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "smooth": 1})
+    assert not ok and "must be a boolean" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "unknown_key": 1})
+    assert not ok and "Unrecognized parameter 'unknown_key'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "   "})
+    assert not ok and "valid non-empty 'name'" in err
+
+    # Group 3B-2: Surface Quality invalid requests
+    # add_bevel limit_method invalid tests
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "limit_method": "WEIGHT"})
+    assert not ok and "must be 'ANGLE' or 'NONE'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "limit_method": ""})
+    assert not ok and "must be a string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "limit_method": 123})
+    assert not ok and "must be a string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "limit_method": True})
+    assert not ok and "must be a string" in err
+
+    # add_bevel angle_limit invalid tests (0 and 181 boundary, bool, nan, inf, string)
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "angle_limit": 0})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "angle_limit": -10})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "angle_limit": 181})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "angle_limit": True})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "angle_limit": float("nan")})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "angle_limit": float("inf")})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "angle_limit": "45"})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    # add_bevel harden_normals invalid tests (int, string rejection)
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "harden_normals": 1})
+    assert not ok and "must be a boolean" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "harden_normals": 0})
+    assert not ok and "must be a boolean" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "add_bevel", "name": "Box", "harden_normals": "true"})
+    assert not ok and "must be a boolean" in err
+
+    # set_shade_smooth auto_smooth invalid tests (int, string rejection)
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "auto_smooth": 1})
+    assert not ok and "must be a boolean" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "auto_smooth": 0})
+    assert not ok and "must be a boolean" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "auto_smooth": "true"})
+    assert not ok and "must be a boolean" in err
+
+    # set_shade_smooth angle invalid tests (0 and 181 boundary, bool, nan, inf, string)
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": 0})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": -5})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": 181})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": True})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": float("nan")})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": float("inf")})
+    assert not ok and "greater than 0 and at most 180" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": "30"})
+    assert not ok and "greater than 0 and at most 180" in err
 
     print("  [PASSED] All invalid requests correctly rejected.")
 
@@ -587,6 +908,8 @@ def test_blender_live_integration():
     assert "Bevel" not in bpy.data.objects["ModBox"].modifiers
     # Verify selection state was restored
     assert bpy.context.view_layer.objects.active == other_obj
+    assert other_obj.select_get()
+    assert not mod_box_obj.select_get(), "Target ModBox must not remain selected after apply_modifier!"
 
     # 9. Test 4 & 5: create_plane and create_torus with color
     res_plane = blender_actions.execute_action({
@@ -806,6 +1129,492 @@ def test_blender_live_integration():
     assert abs(t_obj.dimensions.x - 5.0) < 1e-3
     assert abs(t_obj.dimensions.y - 5.0) < 1e-3
     assert abs(t_obj.dimensions.z - 1.0) < 1e-3
+
+    # -----------------------------------------------------------------------
+    # 13. Group 3A Integration Tests
+    # -----------------------------------------------------------------------
+    blender_actions.execute_action({"action": "clear_scene"})
+
+    # Test 1: Transform actions executed while initially in EDIT mode
+    res_box = blender_actions.execute_action({"action": "create_cube", "name": "EditModeCube", "size": 2.0})
+    cube_obj = bpy.data.objects["EditModeCube"]
+    bpy.context.view_layer.objects.active = cube_obj
+    cube_obj.select_set(True)
+    if bpy.ops.object.mode_set.poll():
+        bpy.ops.object.mode_set(mode='EDIT')
+    assert bpy.context.mode in {'EDIT', 'EDIT_MESH'}
+
+    # set_location from EDIT mode -> should safely switch to OBJECT mode and apply location
+    res_loc = blender_actions.execute_action({"action": "set_location", "name": "EditModeCube", "location": [5.0, 5.0, 5.0]})
+    assert res_loc["status"] == "success"
+    assert bpy.context.mode == 'OBJECT'
+    assert list(cube_obj.location) == [5.0, 5.0, 5.0]
+
+    # Re-enter EDIT mode and test set_rotation, set_scale, set_dimensions
+    bpy.ops.object.mode_set(mode='EDIT')
+    res_rot = blender_actions.execute_action({"action": "set_rotation", "name": "EditModeCube", "rotation": [0, 45, 90]})
+    assert res_rot["status"] == "success"
+    assert bpy.context.mode == 'OBJECT'
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    res_scale = blender_actions.execute_action({"action": "set_scale", "name": "EditModeCube", "scale": [2.0, 1.0, 0.5]})
+    assert res_scale["status"] == "success"
+    assert bpy.context.mode == 'OBJECT'
+    assert list(cube_obj.scale) == [2.0, 1.0, 0.5]
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    res_dims = blender_actions.execute_action({"action": "set_dimensions", "name": "EditModeCube", "dimensions": [4.0, 2.0, 1.0]})
+    assert res_dims["status"] == "success"
+    assert bpy.context.mode == 'OBJECT'
+    assert abs(cube_obj.dimensions.x - 4.0) < 1e-3
+    assert abs(cube_obj.dimensions.y - 2.0) < 1e-3
+    assert abs(cube_obj.dimensions.z - 1.0) < 1e-3
+
+    # Test 2: Planar dimensions on Plane
+    res_plane = blender_actions.execute_action({"action": "create_plane", "name": "PlanarTestPlane", "size": 2.0})
+    assert res_plane["status"] == "success"
+    res_plane_dims = blender_actions.execute_action({"action": "set_dimensions", "name": "PlanarTestPlane", "dimensions": [6.0, 3.0, 0.0]})
+    assert res_plane_dims["status"] == "success"
+    pl_obj = bpy.data.objects["PlanarTestPlane"]
+    assert abs(pl_obj.dimensions.x - 6.0) < 1e-3
+    assert abs(pl_obj.dimensions.y - 3.0) < 1e-3
+    assert abs(pl_obj.dimensions.z - 0.0) < 1e-3
+    assert res_plane_dims["bounds"]["min"][2] == res_plane_dims["bounds"]["max"][2]
+
+    # Test 3: Attempting zero Z-dimension on 3D Cube -> should fail
+    res_fail_zero = blender_actions.execute_action({"action": "set_dimensions", "name": "EditModeCube", "dimensions": [4.0, 2.0, 0.0]})
+    assert res_fail_zero["status"] == "error"
+    assert "non-planar axis" in res_fail_zero["error"].lower() or "cannot set zero dimension" in res_fail_zero["error"].lower()
+
+    # Test 4: apply_transform(scale=True) on non-uniformly scaled cube
+    blender_actions.execute_action({"action": "create_cube", "name": "ScaleApplyCube", "size": 2.0})
+    blender_actions.execute_action({"action": "set_scale", "name": "ScaleApplyCube", "scale": [2.0, 0.5, 3.0]})
+    sac_obj = bpy.data.objects["ScaleApplyCube"]
+    assert list(sac_obj.scale) == [2.0, 0.5, 3.0]
+    expected_dims = [4.0, 1.0, 6.0]
+    for idx, exp_d in enumerate(expected_dims):
+        assert abs(sac_obj.dimensions[idx] - exp_d) < 1e-3
+
+    # Execute apply_transform
+    res_app_scale = blender_actions.execute_action({"action": "apply_transform", "name": "ScaleApplyCube", "scale": True})
+    assert res_app_scale["status"] == "success"
+    assert res_app_scale["action"] == "apply_transform"
+    # Scale must now be [1.0, 1.0, 1.0]
+    assert list(sac_obj.scale) == [1.0, 1.0, 1.0]
+    # Dimensions and world-space bounds must remain unchanged
+    for idx, exp_d in enumerate(expected_dims):
+        assert abs(sac_obj.dimensions[idx] - exp_d) < 1e-3
+    assert abs(res_app_scale["bounds"]["max"][0] - 2.0) < 1e-3
+    assert abs(res_app_scale["bounds"]["min"][0] - (-2.0)) < 1e-3
+
+    # Test 5: apply_transform with rotation and scale independently
+    blender_actions.execute_action({"action": "create_cube", "name": "RotScaleCube", "size": 2.0})
+    blender_actions.execute_action({"action": "set_rotation", "name": "RotScaleCube", "rotation": [0, 0, 45]})
+    blender_actions.execute_action({"action": "set_scale", "name": "RotScaleCube", "scale": [2.0, 2.0, 1.0]})
+    rsc_obj = bpy.data.objects["RotScaleCube"]
+
+    # Apply only rotation
+    res_app_rot = blender_actions.execute_action({"action": "apply_transform", "name": "RotScaleCube", "rotation": True, "scale": False})
+    assert res_app_rot["status"] == "success"
+    assert list(rsc_obj.rotation_euler) == [0.0, 0.0, 0.0]
+    assert list(rsc_obj.scale) == [2.0, 2.0, 1.0]
+
+    # Apply only scale
+    res_app_sc2 = blender_actions.execute_action({"action": "apply_transform", "name": "RotScaleCube", "rotation": False, "scale": True})
+    assert res_app_sc2["status"] == "success"
+    assert list(rsc_obj.scale) == [1.0, 1.0, 1.0]
+
+    # Test 6: Selection and active-object context restoration
+    blender_actions.execute_action({"action": "create_cube", "name": "ActiveObj", "size": 1.0})
+    blender_actions.execute_action({"action": "create_cube", "name": "TargetObj", "size": 1.0})
+    blender_actions.execute_action({"action": "set_scale", "name": "TargetObj", "scale": [3.0, 1.0, 1.0]})
+    active_obj = bpy.data.objects["ActiveObj"]
+    target_obj = bpy.data.objects["TargetObj"]
+
+    # Explicitly set ActiveObj as active and selected, TargetObj unselected
+    target_obj.select_set(False)
+    bpy.context.view_layer.objects.active = active_obj
+    active_obj.select_set(True)
+    assert bpy.context.view_layer.objects.active.name == "ActiveObj"
+    assert not target_obj.select_get()
+
+    res_app_ctx = blender_actions.execute_action({"action": "apply_transform", "name": "TargetObj", "scale": True})
+    assert res_app_ctx["status"] == "success"
+    assert list(target_obj.scale) == [1.0, 1.0, 1.0]
+    # Prior active object and selection restored
+    assert bpy.context.view_layer.objects.active.name == "ActiveObj"
+    assert active_obj.select_get()
+    assert not target_obj.select_get(), "TargetObj must remain unselected after apply_transform!"
+
+    # Test 7: Context restoration when previous active object was None
+    bpy.context.view_layer.objects.active = None
+    target_obj.select_set(False)
+    active_obj.select_set(False)
+    assert bpy.context.view_layer.objects.active is None
+    assert not target_obj.select_get()
+
+    blender_actions.execute_action({"action": "set_scale", "name": "TargetObj", "scale": [2.0, 2.0, 2.0]})
+    res_app_none = blender_actions.execute_action({"action": "apply_transform", "name": "TargetObj", "scale": True})
+    assert res_app_none["status"] == "success"
+    assert list(target_obj.scale) == [1.0, 1.0, 1.0]
+    # Active must be restored to None and TargetObj must not be left selected
+    assert bpy.context.view_layer.objects.active is None
+    assert not target_obj.select_get()
+
+    # Test 8: apply_transform with location=True (baking location into vertices)
+    blender_actions.execute_action({"action": "create_cube", "name": "LocCube", "location": [3.0, 4.0, 5.0], "size": 2.0})
+    loc_obj = bpy.data.objects["LocCube"]
+    assert list(loc_obj.location) == [3.0, 4.0, 5.0]
+
+    res_app_loc = blender_actions.execute_action({
+        "action": "apply_transform",
+        "name": "LocCube",
+        "location": True,
+        "rotation": False,
+        "scale": False
+    })
+    assert res_app_loc["status"] == "success"
+    # Object location is reset to origin
+    assert list(loc_obj.location) == [0.0, 0.0, 0.0]
+    # World bounds center remains [3.0, 4.0, 5.0]
+    assert res_app_loc["bounds"]["center"] == [3.0, 4.0, 5.0]
+    # Raw mesh vertices in local coordinates now reflect the baked offset
+    xs = [v.co.x for v in loc_obj.data.vertices]
+    assert abs(min(xs) - 2.0) < 1e-3 and abs(max(xs) - 4.0) < 1e-3
+
+    # Test 9: apply_transform from EDIT mode
+    blender_actions.execute_action({"action": "create_cube", "name": "EditTransformCube", "size": 2.0})
+    blender_actions.execute_action({"action": "set_scale", "name": "EditTransformCube", "scale": [2.0, 3.0, 4.0]})
+    etc_obj = bpy.data.objects["EditTransformCube"]
+    bpy.context.view_layer.objects.active = etc_obj
+    etc_obj.select_set(True)
+    if bpy.ops.object.mode_set.poll():
+        bpy.ops.object.mode_set(mode='EDIT')
+    assert bpy.context.mode in {'EDIT', 'EDIT_MESH'}
+
+    res_app_edit = blender_actions.execute_action({"action": "apply_transform", "name": "EditTransformCube", "scale": True})
+    assert res_app_edit["status"] == "success"
+    assert bpy.context.mode == 'OBJECT'
+    assert list(etc_obj.scale) == [1.0, 1.0, 1.0]
+
+    # Test 10: apply_modifier context restoration with active=None
+    blender_actions.execute_action({"action": "create_cube", "name": "NoneActiveModBox", "size": 2.0})
+    blender_actions.execute_action({"action": "add_bevel", "name": "NoneActiveModBox", "width": 0.1, "segments": 2})
+    none_mod_obj = bpy.data.objects["NoneActiveModBox"]
+    none_mod_obj.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    assert bpy.context.view_layer.objects.active is None
+
+    res_app_mod_none = blender_actions.execute_action({"action": "apply_modifier", "name": "NoneActiveModBox", "modifier_name": "Bevel"})
+    assert res_app_mod_none["status"] == "success"
+    assert bpy.context.view_layer.objects.active is None
+    assert not none_mod_obj.select_get()
+
+    # Test 11: Failure handling with non-existent object
+    res_app_fail = blender_actions.execute_action({"action": "apply_transform", "name": "NonExistentObjectXYZ", "scale": True})
+    assert res_app_fail["status"] == "error"
+    assert "not found" in res_app_fail["error"].lower()
+
+    # -----------------------------------------------------------------------
+    # 14. Group 3B-1 Integration Tests: Modifier Hardening
+    # -----------------------------------------------------------------------
+    blender_actions.execute_action({"action": "clear_scene"})
+
+    # Test 1: Multiple Bevel Modifiers on same object with auto-suffix and custom names
+    res_bev_cube = blender_actions.execute_action({"action": "create_cube", "name": "MultiBevelCube", "size": 2.0})
+    bev_cube = bpy.data.objects["MultiBevelCube"]
+
+    # 1st bevel (default name "Bevel")
+    res_b1 = blender_actions.execute_action({"action": "add_bevel", "name": "MultiBevelCube", "width": 0.05, "segments": 2})
+    assert res_b1["status"] == "success"
+    assert res_b1["modifier_name"] == "Bevel"
+    assert res_b1["width"] == 0.05
+    assert res_b1["segments"] == 2
+
+    # 2nd bevel (default name "Bevel" -> Blender assigns "Bevel.001")
+    res_b2 = blender_actions.execute_action({"action": "add_bevel", "name": "MultiBevelCube", "width": 0.02, "segments": 4})
+    assert res_b2["status"] == "success"
+    assert res_b2["modifier_name"] == "Bevel.001"
+    assert res_b2["width"] == 0.02
+    assert res_b2["segments"] == 4
+
+    # 3rd bevel with custom name "CustomBevel"
+    res_b3 = blender_actions.execute_action({"action": "add_bevel", "name": "MultiBevelCube", "modifier_name": "CustomBevel", "width": 0.01, "segments": 1})
+    assert res_b3["status"] == "success"
+    assert res_b3["modifier_name"] == "CustomBevel"
+
+    # 4th bevel with duplicate custom name "CustomBevel" -> Blender assigns "CustomBevel.001"
+    res_b4 = blender_actions.execute_action({"action": "add_bevel", "name": "MultiBevelCube", "modifier_name": "CustomBevel", "width": 0.005, "segments": 1})
+    assert res_b4["status"] == "success"
+    assert res_b4["modifier_name"] == "CustomBevel.001"
+
+    # Verify all 4 modifiers exist on the object
+    mod_names = [m.name for m in bev_cube.modifiers]
+    assert mod_names == ["Bevel", "Bevel.001", "CustomBevel", "CustomBevel.001"]
+
+    # Apply exact modifier using the returned modifier_name "Bevel.001"
+    res_app_b2 = blender_actions.execute_action({"action": "apply_modifier", "name": "MultiBevelCube", "modifier_name": res_b2["modifier_name"]})
+    assert res_app_b2["status"] == "success"
+    assert res_app_b2["modifier_name"] == "Bevel.001"
+
+    # Verify "Bevel.001" was applied and removed, while the other 3 remain
+    mod_names_after = [m.name for m in bev_cube.modifiers]
+    assert "Bevel.001" not in mod_names_after
+    assert "Bevel" in mod_names_after
+    assert "CustomBevel" in mod_names_after
+    assert "CustomBevel.001" in mod_names_after
+
+    # Test 2: set_shade_smooth context isolation with multiple selected objects
+    blender_actions.execute_action({"action": "create_cube", "name": "ShadeObjA", "size": 1.0})
+    blender_actions.execute_action({"action": "create_cube", "name": "ShadeObjB", "size": 1.0})
+    blender_actions.execute_action({"action": "create_cube", "name": "ShadeObjC", "size": 1.0})
+    obj_a = bpy.data.objects["ShadeObjA"]
+    obj_b = bpy.data.objects["ShadeObjB"]
+    obj_c = bpy.data.objects["ShadeObjC"]
+
+    # Select ObjA and ObjB, set ObjA active, ObjC unselected
+    obj_c.select_set(False)
+    obj_b.select_set(True)
+    obj_a.select_set(True)
+    bpy.context.view_layer.objects.active = obj_a
+    assert bpy.context.view_layer.objects.active.name == "ShadeObjA"
+    assert obj_a.select_get()
+    assert obj_b.select_get()
+    assert not obj_c.select_get()
+
+    # Call set_shade_smooth on ObjC
+    res_smooth = blender_actions.execute_action({"action": "set_shade_smooth", "name": "ShadeObjC", "smooth": True})
+    assert res_smooth["status"] == "success"
+    assert res_smooth["action"] == "set_shade_smooth"
+    assert res_smooth["smooth"] is True
+
+    # Verify context restoration: ObjA remains active and selected, ObjB remains selected, ObjC remains unselected
+    assert bpy.context.view_layer.objects.active.name == "ShadeObjA"
+    assert obj_a.select_get()
+    assert obj_b.select_get()
+    assert not obj_c.select_get(), "Target ObjC must not be left selected after set_shade_smooth!"
+
+    # Test flat shading path
+    res_flat = blender_actions.execute_action({"action": "set_shade_smooth", "name": "ShadeObjC", "smooth": False})
+    assert res_flat["status"] == "success"
+    assert res_flat["smooth"] is False
+    assert bpy.context.view_layer.objects.active.name == "ShadeObjA"
+    assert not obj_c.select_get()
+
+    # Test 3: Failure paths on missing objects/modifiers
+    # Non-existent modifier on object
+    res_fail_mod = blender_actions.execute_action({"action": "apply_modifier", "name": "MultiBevelCube", "modifier_name": "NonExistentMod"})
+    assert res_fail_mod["status"] == "error"
+    assert "not found" in res_fail_mod["error"].lower()
+
+    # Non-existent object in add_bevel
+    res_fail_bev = blender_actions.execute_action({"action": "add_bevel", "name": "GhostObjectXYZ"})
+    assert res_fail_bev["status"] == "error"
+    assert "not found" in res_fail_bev["error"].lower()
+
+    # Non-existent object in set_shade_smooth
+    res_fail_smooth = blender_actions.execute_action({"action": "set_shade_smooth", "name": "GhostObjectXYZ"})
+    assert res_fail_smooth["status"] == "error"
+    assert "not found" in res_fail_smooth["error"].lower()
+
+    # Non-mesh object in add_bevel (Camera)
+    blender_actions.execute_action({"action": "create_camera", "name": "NonMeshCamera"})
+    res_fail_camera = blender_actions.execute_action({"action": "add_bevel", "name": "NonMeshCamera"})
+    assert res_fail_camera["status"] == "error"
+    assert "not a mesh" in res_fail_camera["error"].lower()
+
+    # -----------------------------------------------------------------------
+    # Group 3B-2: Surface Quality live integration tests
+    # -----------------------------------------------------------------------
+    # 1. Bevel parameter assignment and RNA verification
+    res_cyl_a = blender_actions.execute_action({
+        "action": "create_cylinder",
+        "name": "SQ_CylAngle",
+        "vertices": 16,
+        "radius": 1.0,
+        "height": 2.0
+    })
+    assert res_cyl_a["status"] == "success"
+    cyl_a_obj = bpy.data.objects["SQ_CylAngle"]
+
+    # Add bevel with defaults (limit_method=ANGLE, angle_limit=30.0, harden_normals=True)
+    res_bev_def = blender_actions.execute_action({
+        "action": "add_bevel",
+        "name": "SQ_CylAngle",
+        "width": 0.1,
+        "segments": 2
+    })
+    assert res_bev_def["status"] == "success"
+    assert res_bev_def["limit_method"] == "ANGLE"
+    assert res_bev_def["angle_limit"] == 30.0
+    assert res_bev_def["harden_normals"] is True
+    mod_a = cyl_a_obj.modifiers[res_bev_def["modifier_name"]]
+    assert mod_a.limit_method == "ANGLE"
+    assert abs(math.degrees(mod_a.angle_limit) - 30.0) < 1e-4
+    assert mod_a.harden_normals is True
+
+    # Add bevel with explicit limit_method="NONE", custom angle_limit, harden_normals=False
+    res_cyl_n = blender_actions.execute_action({
+        "action": "create_cylinder",
+        "name": "SQ_CylNone",
+        "vertices": 16,
+        "radius": 1.0,
+        "height": 2.0
+    })
+    assert res_cyl_n["status"] == "success"
+    cyl_n_obj = bpy.data.objects["SQ_CylNone"]
+
+    res_bev_none = blender_actions.execute_action({
+        "action": "add_bevel",
+        "name": "SQ_CylNone",
+        "width": 0.1,
+        "segments": 2,
+        "limit_method": "NONE",
+        "angle_limit": 45.0,
+        "harden_normals": False
+    })
+    assert res_bev_none["status"] == "success"
+    assert res_bev_none["limit_method"] == "NONE"
+    assert res_bev_none["angle_limit"] == 45.0
+    assert res_bev_none["harden_normals"] is False
+    mod_n = cyl_n_obj.modifiers[res_bev_none["modifier_name"]]
+    assert mod_n.limit_method == "NONE"
+    assert mod_n.harden_normals is False
+
+    # 2. Geometric evidence: Compare evaluated geometry between ANGLE and NONE on 16-seg cylinder
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_mesh_a = cyl_a_obj.evaluated_get(depsgraph).to_mesh()
+    eval_mesh_n = cyl_n_obj.evaluated_get(depsgraph).to_mesh()
+
+    # ANGLE mode skips 16 longitudinal body edges (dihedral angle 22.5 deg < 30.0 deg)
+    # Only the two circular end rims (90 deg) are beveled: 96 vertices, 176 edges, 82 polygons
+    # NONE mode bevels all 16 body edges + 2 rims: 224 vertices, 432 edges, 210 polygons
+    assert len(eval_mesh_a.polygons) == 82, f"Expected 82 polygons in ANGLE mode, got {len(eval_mesh_a.polygons)}"
+    assert len(eval_mesh_n.polygons) == 210, f"Expected 210 polygons in NONE mode, got {len(eval_mesh_n.polygons)}"
+    assert len(eval_mesh_a.edges) == 176, f"Expected 176 edges in ANGLE mode, got {len(eval_mesh_a.edges)}"
+    assert len(eval_mesh_n.edges) == 432, f"Expected 432 edges in NONE mode, got {len(eval_mesh_n.edges)}"
+    assert len(eval_mesh_a.vertices) == 96, f"Expected 96 vertices in ANGLE mode, got {len(eval_mesh_a.vertices)}"
+    assert len(eval_mesh_n.vertices) == 224, f"Expected 224 vertices in NONE mode, got {len(eval_mesh_n.vertices)}"
+    cyl_a_obj.to_mesh_clear()
+    cyl_n_obj.to_mesh_clear()
+
+    # Verify returned modifier name is directly usable by apply_modifier
+    res_apply_a = blender_actions.execute_action({
+        "action": "apply_modifier",
+        "name": "SQ_CylAngle",
+        "modifier_name": res_bev_def["modifier_name"]
+    })
+    assert res_apply_a["status"] == "success"
+    assert len(cyl_a_obj.modifiers) == 0
+    assert len(cyl_a_obj.data.polygons) == 82, "Baked mesh must retain evaluated 82 polygons after apply_modifier"
+
+    # 3. Smooth-by-Angle live integration tests
+    res_smooth_cyl = blender_actions.execute_action({
+        "action": "create_cylinder",
+        "name": "SQ_SmoothCyl",
+        "vertices": 16,
+        "radius": 1.0,
+        "height": 2.0
+    })
+    assert res_smooth_cyl["status"] == "success"
+    smooth_cyl_obj = bpy.data.objects["SQ_SmoothCyl"]
+
+    # Call shade_smooth with auto_smooth=True and angle=30.0
+    res_ss_angle = blender_actions.execute_action({
+        "action": "set_shade_smooth",
+        "name": "SQ_SmoothCyl",
+        "smooth": True,
+        "auto_smooth": True,
+        "angle": 30.0
+    })
+    assert res_ss_angle["status"] == "success"
+    assert res_ss_angle["smooth"] is True
+    assert res_ss_angle["auto_smooth"] is True
+    assert res_ss_angle["angle"] == 30.0
+
+    # Inspect polygons and edges: all polygons smooth; 32 rim edges sharp, 16 body edges smooth
+    assert all(p.use_smooth for p in smooth_cyl_obj.data.polygons), "All polygons must have use_smooth=True"
+    sharp_edges = [e for e in smooth_cyl_obj.data.edges if e.use_edge_sharp]
+    assert len(sharp_edges) == 32, f"Expected 32 sharp rim edges, got {len(sharp_edges)}"
+    assert len(smooth_cyl_obj.data.edges) == 48, f"Expected 48 total edges, got {len(smooth_cyl_obj.data.edges)}"
+
+    # Call normal shade_smooth (smooth=True, auto_smooth=False) on standard cube
+    res_smooth_cube = blender_actions.execute_action({
+        "action": "create_cube",
+        "name": "SQ_SmoothNormalCube",
+        "size": 1.5
+    })
+    assert res_smooth_cube["status"] == "success"
+    cube_obj = bpy.data.objects["SQ_SmoothNormalCube"]
+
+    res_ss_norm = blender_actions.execute_action({
+        "action": "set_shade_smooth",
+        "name": "SQ_SmoothNormalCube",
+        "smooth": True,
+        "auto_smooth": False
+    })
+    assert res_ss_norm["status"] == "success"
+    assert res_ss_norm["smooth"] is True
+    assert res_ss_norm["auto_smooth"] is False
+    assert all(p.use_smooth for p in cube_obj.data.polygons)
+    assert not any(e.use_edge_sharp for e in cube_obj.data.edges), "Normal smooth shading must not mark edges sharp"
+
+    # Call flat shading (smooth=False, auto_smooth=True) -> Must apply shade_flat regardless of auto_smooth
+    res_ss_flat = blender_actions.execute_action({
+        "action": "set_shade_smooth",
+        "name": "SQ_SmoothCyl",
+        "smooth": False,
+        "auto_smooth": True
+    })
+    assert res_ss_flat["status"] == "success"
+    assert res_ss_flat["smooth"] is False
+    assert not any(p.use_smooth for p in smooth_cyl_obj.data.polygons), "Flat shading must clear polygon use_smooth"
+
+    # Context & selection isolation: unselected target and active=None restoration
+    res_ref_box = blender_actions.execute_action({"action": "create_cube", "name": "SQ_RefBox", "size": 1.0})
+    ref_box_obj = bpy.data.objects["SQ_RefBox"]
+
+    # Select RefBox, set active, leave SQ_SmoothCyl unselected
+    smooth_cyl_obj.select_set(False)
+    ref_box_obj.select_set(True)
+    bpy.context.view_layer.objects.active = ref_box_obj
+    assert bpy.context.view_layer.objects.active == ref_box_obj
+    assert not smooth_cyl_obj.select_get()
+
+    res_ss_iso = blender_actions.execute_action({
+        "action": "set_shade_smooth",
+        "name": "SQ_SmoothCyl",
+        "smooth": True,
+        "auto_smooth": True,
+        "angle": 45.0
+    })
+    assert res_ss_iso["status"] == "success"
+    assert not smooth_cyl_obj.select_get(), "SQ_SmoothCyl must remain unselected"
+    assert ref_box_obj.select_get(), "SQ_RefBox must remain selected"
+    assert bpy.context.view_layer.objects.active == ref_box_obj, "SQ_RefBox must remain active"
+
+    # active=None restoration
+    bpy.context.view_layer.objects.active = None
+    res_ss_no_active = blender_actions.execute_action({
+        "action": "set_shade_smooth",
+        "name": "SQ_SmoothCyl",
+        "smooth": True,
+        "auto_smooth": False
+    })
+    assert res_ss_no_active["status"] == "success"
+    assert bpy.context.view_layer.objects.active is None, "active=None must be restored"
+
+    # Context preservation on failure
+    ref_box_obj.select_set(True)
+    bpy.context.view_layer.objects.active = ref_box_obj
+    res_fail_target = blender_actions.execute_action({
+        "action": "set_shade_smooth",
+        "name": "NonExistentObject123",
+        "smooth": True
+    })
+    assert res_fail_target["status"] == "error"
+    assert ref_box_obj.select_get()
+    assert bpy.context.view_layer.objects.active == ref_box_obj
 
     # Clean up
     blender_actions.execute_action({"action": "clear_scene"})

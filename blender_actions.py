@@ -258,9 +258,96 @@ def action_set_scale(params: dict) -> dict:
 def action_set_dimensions(params: dict) -> dict:
     obj = get_object(params["name"])
     dims = [float(v) for v in params["dimensions"]]
+
+    # If any dimension is zero, ensure the object is actually planar along that axis
+    if hasattr(obj, "data") and hasattr(obj.data, "vertices") and len(obj.data.vertices) > 0:
+        axis_attrs = ("x", "y", "z")
+        for d, axis in zip(dims, axis_attrs):
+            if d == 0.0:
+                coords = [getattr(v.co, axis) for v in obj.data.vertices]
+                local_span = max(coords) - min(coords)
+                if local_span > 1e-5:
+                    raise ValueError(f"Cannot set zero dimension on non-planar axis '{axis.upper()}' of object '{obj.name}'.")
+
     obj.dimensions = tuple(dims)
     msg = f"Set dimensions of '{obj.name}' to {dims}"
     return build_object_response(obj, "set_dimensions", msg)
+
+
+def _restore_selection_and_active(prev_selected: list, prev_active, target_obj=None):
+    """Safely restore original selection and active object, ignoring deleted objects."""
+    try:
+        # If target was not originally selected, ensure it is deselected
+        if target_obj and target_obj not in prev_selected:
+            try:
+                if hasattr(bpy.data, "objects") and target_obj.name in bpy.data.objects:
+                    target_obj.select_set(False)
+            except Exception:
+                pass
+
+        # Restore original selection set (ignoring any objects that no longer exist)
+        for o in prev_selected:
+            try:
+                if o and hasattr(bpy.data, "objects") and o.name in bpy.data.objects:
+                    o.select_set(True)
+            except Exception:
+                pass
+
+        # Restore original active object (including None)
+        if prev_active:
+            try:
+                if hasattr(bpy.data, "objects") and prev_active.name in bpy.data.objects:
+                    bpy.context.view_layer.objects.active = prev_active
+            except Exception:
+                pass
+        else:
+            try:
+                bpy.context.view_layer.objects.active = None
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def action_apply_transform(params: dict) -> dict:
+    obj = get_object(params["name"])
+    apply_loc = bool(params.get("location", False))
+    apply_rot = bool(params.get("rotation", False))
+    apply_scale = bool(params.get("scale", True))
+
+    if not (apply_loc or apply_rot or apply_scale):
+        raise ValueError(f"apply_transform on '{obj.name}' requires at least one of 'location', 'rotation', or 'scale' to be True.")
+
+    prev_active = getattr(bpy.context.view_layer.objects, "active", None)
+    prev_selected = list(getattr(bpy.context, "selected_objects", []))
+
+    try:
+        # Deselect other objects and ensure target is selected and active
+        for o in prev_selected:
+            if o != obj:
+                o.select_set(False)
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+
+        ensure_object_mode()
+
+        if hasattr(bpy.ops.object, "transform_apply"):
+            if not bpy.ops.object.transform_apply.poll():
+                raise RuntimeError(f"Cannot apply transform on '{obj.name}': context poll failed.")
+            bpy.ops.object.transform_apply(
+                location=apply_loc,
+                rotation=apply_rot,
+                scale=apply_scale
+            )
+        else:
+            raise RuntimeError("bpy.ops.object.transform_apply operator not available.")
+
+        bpy.context.view_layer.update()
+    finally:
+        _restore_selection_and_active(prev_selected, prev_active, obj)
+
+    msg = f"Applied transform on '{obj.name}' (location={apply_loc}, rotation={apply_rot}, scale={apply_scale})"
+    return build_object_response(obj, "apply_transform", msg)
 
 
 def action_rename_object(params: dict) -> dict:
@@ -297,14 +384,47 @@ def action_add_bevel(params: dict) -> dict:
     if obj.type != 'MESH':
         raise ValueError(f"Object '{obj.name}' is not a mesh; cannot add bevel.")
 
+    mod_name_req = str(params.get("modifier_name", "Bevel")).strip() or "Bevel"
     width = float(params.get("width", 0.05))
     segments = int(params.get("segments", 3))
 
-    mod = obj.modifiers.new(name="Bevel", type='BEVEL')
+    limit_method_raw = params.get("limit_method", "ANGLE")
+    limit_method = str(limit_method_raw).strip().upper() if isinstance(limit_method_raw, str) else "ANGLE"
+    if limit_method not in {"ANGLE", "NONE"}:
+        limit_method = "ANGLE"
+
+    angle_limit = float(params.get("angle_limit", 30.0))
+    harden_normals = params.get("harden_normals", True)
+    if not isinstance(harden_normals, bool):
+        harden_normals = True
+
+    mod = obj.modifiers.new(name=mod_name_req, type='BEVEL')
     mod.width = width
     mod.segments = segments
+    mod.limit_method = limit_method
+    if limit_method == "ANGLE":
+        mod.angle_limit = math.radians(angle_limit)
+    else:
+        try:
+            mod.angle_limit = math.radians(angle_limit)
+        except Exception:
+            pass
+    mod.harden_normals = harden_normals
+    actual_mod_name = mod.name
+
     bpy.context.view_layer.update()
-    return {"status": "success", "message": f"Added Bevel modifier to '{obj.name}' (width={width}, segments={segments})", "object": obj.name}
+    return {
+        "status": "success",
+        "action": "add_bevel",
+        "message": f"Added Bevel modifier '{actual_mod_name}' to '{obj.name}' (width={width}, segments={segments}, limit_method={limit_method})",
+        "object": obj.name,
+        "modifier_name": actual_mod_name,
+        "width": width,
+        "segments": segments,
+        "limit_method": limit_method,
+        "angle_limit": angle_limit,
+        "harden_normals": harden_normals
+    }
 
 
 def action_set_shade_smooth(params: dict) -> dict:
@@ -312,24 +432,72 @@ def action_set_shade_smooth(params: dict) -> dict:
     if obj.type != 'MESH':
         raise ValueError(f"Object '{obj.name}' is not a mesh; cannot set smooth shading.")
 
-    smooth = bool(params.get("smooth", True))
-    bpy.context.view_layer.objects.active = obj
-    obj.select_set(True)
+    smooth = params.get("smooth", True)
+    if not isinstance(smooth, bool):
+        smooth = True
 
-    if smooth:
-        bpy.ops.object.shade_smooth()
-        msg = f"Applied smooth shading to '{obj.name}'"
-    else:
-        bpy.ops.object.shade_flat()
-        msg = f"Applied flat shading to '{obj.name}'"
+    auto_smooth = params.get("auto_smooth", False)
+    if not isinstance(auto_smooth, bool):
+        auto_smooth = False
 
-    bpy.context.view_layer.update()
-    return {"status": "success", "message": msg, "object": obj.name}
+    angle = float(params.get("angle", 30.0))
+
+    prev_active = getattr(bpy.context.view_layer.objects, "active", None)
+    prev_selected = list(getattr(bpy.context, "selected_objects", []))
+
+    try:
+        # Deselect other objects and ensure target is selected and active
+        for o in prev_selected:
+            if o != obj:
+                o.select_set(False)
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+
+        ensure_object_mode()
+
+        if not smooth:
+            if hasattr(bpy.ops.object, "shade_flat"):
+                if not bpy.ops.object.shade_flat.poll():
+                    raise RuntimeError(f"Cannot apply shade_flat on '{obj.name}': context poll failed.")
+                bpy.ops.object.shade_flat()
+            msg = f"Applied flat shading to '{obj.name}'"
+        elif auto_smooth:
+            if hasattr(bpy.ops.object, "shade_smooth_by_angle"):
+                if not bpy.ops.object.shade_smooth_by_angle.poll():
+                    raise RuntimeError(f"Cannot apply shade_smooth_by_angle on '{obj.name}': context poll failed.")
+                bpy.ops.object.shade_smooth_by_angle(angle=math.radians(angle))
+            elif hasattr(bpy.ops.object, "shade_smooth"):
+                if not bpy.ops.object.shade_smooth.poll():
+                    raise RuntimeError(f"Cannot apply shade_smooth on '{obj.name}': context poll failed.")
+                bpy.ops.object.shade_smooth()
+            msg = f"Applied smooth shading by angle ({angle}°) to '{obj.name}'"
+        else:
+            if hasattr(bpy.ops.object, "shade_smooth"):
+                if not bpy.ops.object.shade_smooth.poll():
+                    raise RuntimeError(f"Cannot apply shade_smooth on '{obj.name}': context poll failed.")
+                bpy.ops.object.shade_smooth()
+            msg = f"Applied smooth shading to '{obj.name}'"
+
+        bpy.context.view_layer.update()
+    finally:
+        _restore_selection_and_active(prev_selected, prev_active, obj)
+
+    return {
+        "status": "success",
+        "action": "set_shade_smooth",
+        "message": msg,
+        "object": obj.name,
+        "smooth": smooth,
+        "auto_smooth": auto_smooth,
+        "angle": angle
+    }
 
 
 def action_apply_modifier(params: dict) -> dict:
     obj = get_object(params["name"])
-    mod_name = params.get("modifier_name", "Bevel")
+    mod_name = str(params.get("modifier_name", "Bevel")).strip()
+    if not mod_name:
+        raise ValueError("Parameter 'modifier_name' cannot be empty")
     if mod_name not in obj.modifiers:
         raise ValueError(f"Modifier '{mod_name}' not found on object '{obj.name}'")
 
@@ -356,15 +524,7 @@ def action_apply_modifier(params: dict) -> dict:
 
         bpy.context.view_layer.update()
     finally:
-        # Restore prior selection and active object
-        try:
-            for o in prev_selected:
-                if o and o.name in bpy.data.objects:
-                    o.select_set(True)
-            if prev_active and prev_active.name in bpy.data.objects:
-                bpy.context.view_layer.objects.active = prev_active
-        except Exception:
-            pass
+        _restore_selection_and_active(prev_selected, prev_active, obj)
 
     return {
         "status": "success",
@@ -795,6 +955,7 @@ ACTION_DISPATCH = {
     "set_rotation": action_set_rotation,
     "set_scale": action_set_scale,
     "set_dimensions": action_set_dimensions,
+    "apply_transform": action_apply_transform,
     "rename_object": action_rename_object,
     "delete_object": action_delete_object,
     "clear_scene": action_clear_scene,
@@ -824,6 +985,11 @@ OBJECT_MODE_REQUIRED_ACTIONS = {
     "create_plane",
     "create_cone",
     "create_torus",
+    "set_location",
+    "set_rotation",
+    "set_scale",
+    "set_dimensions",
+    "apply_transform",
     "delete_object",
     "clear_scene",
     "add_bevel",

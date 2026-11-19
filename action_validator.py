@@ -17,6 +17,7 @@ SUPPORTED_ACTIONS = {
     "set_rotation",
     "set_scale",
     "set_dimensions",
+    "apply_transform",
     "rename_object",
     "delete_object",
     "clear_scene",
@@ -55,6 +56,13 @@ PRIMITIVE_ALLOWED_KEYS = {
     "create_plane": {"action", "name", "location", "color", "size", "dimensions", "width", "depth"},
     "create_cone": {"action", "name", "location", "color", "radius", "radius1", "radius_top", "radius2", "height", "depth", "vertices"},
     "create_torus": {"action", "name", "location", "color", "major_radius", "minor_radius", "major_segments", "minor_segments"},
+}
+
+# Allowed keys for modifier actions
+MODIFIER_ALLOWED_KEYS = {
+    "add_bevel": {"action", "name", "width", "segments", "modifier_name", "limit_method", "angle_limit", "harden_normals"},
+    "apply_modifier": {"action", "name", "modifier_name"},
+    "set_shade_smooth": {"action", "name", "smooth", "auto_smooth", "angle"},
 }
 
 
@@ -392,17 +400,43 @@ def validate_single_action(action: dict):
         if not ok:
             return False, err
 
-    elif act_type in {"set_scale", "set_dimensions"}:
-        field = "scale" if act_type == "set_scale" else "dimensions"
+    elif act_type == "set_scale":
         if "name" not in action or not str(action["name"]).strip():
-            return False, f"{act_type} requires a valid 'name' attribute"
-        ok, err = _validate_vec3(action.get(field), field)
+            return False, "set_scale requires a valid 'name' attribute"
+        ok, err = _validate_vec3(action.get("scale"), "scale")
         if not ok:
             return False, err
-        if act_type == "set_dimensions":
-            for d in action[field]:
-                if not _is_positive_number(d):
-                    return False, "All dimensions in 'set_dimensions' must be positive numbers"
+        for s in action["scale"]:
+            if not _is_positive_number(s):
+                return False, f"All scale components in 'set_scale' must be strictly positive numbers (got {s!r})"
+
+    elif act_type == "set_dimensions":
+        if "name" not in action or not str(action["name"]).strip():
+            return False, "set_dimensions requires a valid 'name' attribute"
+        ok, err = _validate_vec3(action.get("dimensions"), "dimensions")
+        if not ok:
+            return False, err
+        dims = action["dimensions"]
+        for d in dims:
+            if not _is_non_negative_number(d):
+                return False, f"All dimensions in 'set_dimensions' must be non-negative numbers (got {d!r})"
+        if sum(1 for d in dims if d == 0) > 1:
+            return False, "At most one dimension in 'set_dimensions' may be zero for planar geometry"
+        if sum(1 for d in dims if d > 0) < 2:
+            return False, "At least two dimensions in 'set_dimensions' must be strictly positive"
+
+    elif act_type == "apply_transform":
+        if "name" not in action or not str(action["name"]).strip():
+            return False, "apply_transform requires a valid 'name' attribute"
+        allowed_keys = {"action", "name", "location", "rotation", "scale"}
+        for k in action.keys():
+            if k not in allowed_keys:
+                return False, f"Unrecognized parameter '{k}' for action 'apply_transform'. Allowed: {sorted(list(allowed_keys))}"
+        for flag in ("location", "rotation", "scale"):
+            if flag in action and not isinstance(action[flag], bool):
+                return False, f"Parameter '{flag}' in 'apply_transform' must be a boolean"
+        if action.get("location") is False and action.get("rotation") is False and action.get("scale") is False:
+            return False, "apply_transform requires at least one of 'location', 'rotation', or 'scale' to be True"
 
     elif act_type == "rename_object":
         if not action.get("name") or not action.get("new_name"):
@@ -416,23 +450,60 @@ def validate_single_action(action: dict):
         pass
 
     # Geometry
-    elif act_type == "add_bevel":
-        if not action.get("name"):
-            return False, "add_bevel requires 'name'"
-        if "width" in action:
-            try:
-                if float(action["width"]) <= 0:
-                    return False, "Bevel 'width' must be positive"
-            except (ValueError, TypeError):
-                return False, "Bevel 'width' must be numeric"
+    elif act_type in MODIFIER_ALLOWED_KEYS:
+        # Strict unknown parameter checking for modifier actions
+        allowed = MODIFIER_ALLOWED_KEYS[act_type]
+        for k in action.keys():
+            if k not in allowed:
+                return False, f"Unrecognized parameter '{k}' for action '{act_type}'. Allowed: {sorted(list(allowed))}"
 
-    elif act_type == "set_shade_smooth":
-        if not action.get("name"):
-            return False, "set_shade_smooth requires 'name'"
+        # Target object name validation
+        if "name" not in action or not isinstance(action["name"], str) or not action["name"].strip():
+            return False, f"{act_type} requires a valid non-empty 'name' attribute"
 
-    elif act_type == "apply_modifier":
-        if not action.get("name"):
-            return False, "apply_modifier requires 'name'"
+        if act_type == "add_bevel":
+            if "modifier_name" in action:
+                if not isinstance(action["modifier_name"], str) or not action["modifier_name"].strip():
+                    return False, "Parameter 'modifier_name' must be a non-empty string"
+            if "width" in action:
+                if not _is_positive_number(action["width"]):
+                    return False, "Bevel 'width' must be a strictly positive finite number"
+            if "segments" in action:
+                seg = action["segments"]
+                if not _is_integer(seg) or not (1 <= seg <= 128):
+                    return False, "Bevel 'segments' must be an integer between 1 and 128"
+            if "limit_method" in action:
+                lm = action["limit_method"]
+                if not isinstance(lm, str) or not lm.strip():
+                    return False, "Parameter 'limit_method' in 'add_bevel' must be a string ('ANGLE' or 'NONE')"
+                lm_norm = lm.strip().upper()
+                if lm_norm not in {"ANGLE", "NONE"}:
+                    return False, f"Parameter 'limit_method' in 'add_bevel' must be 'ANGLE' or 'NONE', got '{lm}'"
+                action["limit_method"] = lm_norm
+            if "angle_limit" in action:
+                al = action["angle_limit"]
+                if not _is_number(al) or not (0.0 < float(al) <= 180.0):
+                    return False, "Parameter 'angle_limit' in 'add_bevel' must be a finite number strictly greater than 0 and at most 180 degrees"
+            if "harden_normals" in action:
+                if not isinstance(action["harden_normals"], bool):
+                    return False, "Parameter 'harden_normals' in 'add_bevel' must be a boolean"
+
+        elif act_type == "apply_modifier":
+            if "modifier_name" in action:
+                if not isinstance(action["modifier_name"], str) or not action["modifier_name"].strip():
+                    return False, "Parameter 'modifier_name' must be a non-empty string"
+
+        elif act_type == "set_shade_smooth":
+            if "smooth" in action:
+                if not isinstance(action["smooth"], bool):
+                    return False, "Parameter 'smooth' in 'set_shade_smooth' must be a boolean"
+            if "auto_smooth" in action:
+                if not isinstance(action["auto_smooth"], bool):
+                    return False, "Parameter 'auto_smooth' in 'set_shade_smooth' must be a boolean"
+            if "angle" in action:
+                ang = action["angle"]
+                if not _is_number(ang) or not (0.0 < float(ang) <= 180.0):
+                    return False, "Parameter 'angle' in 'set_shade_smooth' must be a finite number strictly greater than 0 and at most 180 degrees"
 
     # Materials
     elif act_type == "set_material":
