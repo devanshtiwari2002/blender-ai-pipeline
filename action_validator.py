@@ -18,9 +18,13 @@ SUPPORTED_ACTIONS = {
     "set_scale",
     "set_dimensions",
     "apply_transform",
+    "set_origin",
     "rename_object",
     "delete_object",
     "clear_scene",
+    # Hierarchy & Assembly
+    "set_parent",
+    "clear_parent",
     # Geometry
     "add_bevel",
     "set_shade_smooth",
@@ -46,6 +50,7 @@ MAX_ACTIONS_PER_REQUEST = 500
 VALID_RELATIONSHIPS = {"above", "below", "beside", "inside", "centred_on", "centered_on", "around"}
 VALID_BESIDE_DIRECTIONS = {"+X", "-X", "+Y", "-Y", "RIGHT", "LEFT", "FRONT", "BACK"}
 VALID_ALIGNMENTS = {"center", "centre", "min", "max"}
+VALID_ORIGIN_MODES = {"BOTTOM", "CENTER", "TOP"}
 
 # Allowed keys for the 7 primitive creation actions (strict unknown parameter checking)
 PRIMITIVE_ALLOWED_KEYS = {
@@ -437,6 +442,51 @@ def validate_single_action(action: dict):
                 return False, f"Parameter '{flag}' in 'apply_transform' must be a boolean"
         if action.get("location") is False and action.get("rotation") is False and action.get("scale") is False:
             return False, "apply_transform requires at least one of 'location', 'rotation', or 'scale' to be True"
+
+    elif act_type == "set_origin":
+        allowed_keys = {"action", "name", "origin_mode", "mode"}
+        for k in action.keys():
+            if k not in allowed_keys:
+                return False, f"Unrecognized parameter '{k}' for action 'set_origin'. Allowed: {sorted(list(allowed_keys))}"
+        if "name" not in action or not isinstance(action["name"], str) or not action["name"].strip():
+            return False, "set_origin requires a valid non-empty 'name' attribute"
+
+        mode_val = action.get("origin_mode") if "origin_mode" in action else action.get("mode")
+        if mode_val is None:
+            return False, "set_origin requires 'origin_mode' (or 'mode') attribute"
+        if not isinstance(mode_val, str) or not mode_val.strip():
+            return False, "Parameter 'origin_mode' in 'set_origin' must be a non-empty string"
+
+        if "origin_mode" in action and "mode" in action:
+            if not isinstance(action["mode"], str) or not action["mode"].strip():
+                return False, "Parameter 'mode' in 'set_origin' must be a non-empty string"
+            if action["origin_mode"].strip().upper() != action["mode"].strip().upper():
+                return False, f"Conflicting values for 'origin_mode' ('{action['origin_mode']}') and 'mode' ('{action['mode']}')"
+
+        norm_mode = mode_val.strip().upper()
+        if norm_mode not in VALID_ORIGIN_MODES:
+            return False, f"Invalid origin mode '{mode_val}'. Allowed: {sorted(list(VALID_ORIGIN_MODES))}"
+        action["origin_mode"] = norm_mode
+
+    elif act_type == "set_parent":
+        allowed_keys = {"action", "name", "parent"}
+        for k in action.keys():
+            if k not in allowed_keys:
+                return False, f"Unrecognized parameter '{k}' for action 'set_parent'. Allowed: {sorted(list(allowed_keys))}"
+        if "name" not in action or not isinstance(action["name"], str) or not action["name"].strip():
+            return False, "set_parent requires a valid non-empty 'name' attribute"
+        if "parent" not in action or not isinstance(action["parent"], str) or not action["parent"].strip():
+            return False, "set_parent requires a valid non-empty 'parent' attribute"
+        if action["name"].strip() == action["parent"].strip():
+            return False, f"Cannot parent object '{action['name'].strip()}' to itself"
+
+    elif act_type == "clear_parent":
+        allowed_keys = {"action", "name"}
+        for k in action.keys():
+            if k not in allowed_keys:
+                return False, f"Unrecognized parameter '{k}' for action 'clear_parent'. Allowed: {sorted(list(allowed_keys))}"
+        if "name" not in action or not isinstance(action["name"], str) or not action["name"].strip():
+            return False, "clear_parent requires a valid non-empty 'name' attribute"
 
     elif act_type == "rename_object":
         if not action.get("name") or not action.get("new_name"):

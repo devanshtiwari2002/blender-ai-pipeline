@@ -350,6 +350,74 @@ def action_apply_transform(params: dict) -> dict:
     return build_object_response(obj, "apply_transform", msg)
 
 
+def action_set_origin(params: dict) -> dict:
+    obj = get_object(params["name"])
+    if obj.type != 'MESH':
+        raise ValueError(f"Object '{obj.name}' is not a mesh; cannot set origin.")
+
+    if not hasattr(obj.data, "vertices") or len(obj.data.vertices) == 0:
+        raise ValueError(f"Mesh '{obj.name}' has no vertices; cannot set origin.")
+
+    mode_raw = params.get("origin_mode") or params.get("mode") or "CENTER"
+    mode = str(mode_raw).strip().upper()
+    if mode not in {"BOTTOM", "CENTER", "TOP"}:
+        raise ValueError(f"Invalid origin mode '{mode_raw}'. Must be 'BOTTOM', 'CENTER', or 'TOP'.")
+
+    # Compute target origin in local coordinates based on bounding geometry
+    bbox = obj.bound_box
+    min_x = min(c[0] for c in bbox)
+    max_x = max(c[0] for c in bbox)
+    min_y = min(c[1] for c in bbox)
+    max_y = max(c[1] for c in bbox)
+    min_z = min(c[2] for c in bbox)
+    max_z = max(c[2] for c in bbox)
+
+    cx = (min_x + max_x) / 2.0
+    cy = (min_y + max_y) / 2.0
+    cz = (min_z + max_z) / 2.0
+
+    if mode == "BOTTOM":
+        local_target = mathutils.Vector((cx, cy, min_z))
+    elif mode == "TOP":
+        local_target = mathutils.Vector((cx, cy, max_z))
+    else:  # CENTER
+        local_target = mathutils.Vector((cx, cy, cz))
+
+    world_target = obj.matrix_world @ local_target
+
+    prev_active = getattr(bpy.context.view_layer.objects, "active", None)
+    prev_selected = list(getattr(bpy.context, "selected_objects", []))
+    prev_cursor_loc = bpy.context.scene.cursor.location.copy()
+
+    try:
+        # Deselect other objects and ensure target is selected and active
+        for o in prev_selected:
+            if o != obj:
+                o.select_set(False)
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+
+        ensure_object_mode()
+
+        bpy.context.scene.cursor.location = world_target
+        if hasattr(bpy.ops.object, "origin_set"):
+            if not bpy.ops.object.origin_set.poll():
+                raise RuntimeError(f"Cannot set origin on '{obj.name}': context poll failed.")
+            bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
+        else:
+            raise RuntimeError("bpy.ops.object.origin_set operator not available.")
+
+        bpy.context.view_layer.update()
+    finally:
+        bpy.context.scene.cursor.location = prev_cursor_loc
+        _restore_selection_and_active(prev_selected, prev_active, obj)
+
+    msg = f"Set origin of '{obj.name}' to {mode} at {[round(v, 4) for v in world_target]}"
+    res = build_object_response(obj, "set_origin", msg)
+    res["origin_mode"] = mode
+    return res
+
+
 def action_rename_object(params: dict) -> dict:
     obj = get_object(params["name"])
     new_name = str(params["new_name"]).strip()
@@ -377,6 +445,69 @@ def action_clear_scene(params: dict = None) -> dict:
             deleted_count += 1
     bpy.context.view_layer.update()
     return {"status": "success", "message": f"Cleared {deleted_count} mesh objects from scene"}
+
+
+def action_set_parent(params: dict) -> dict:
+    child = get_object(params["name"])
+    parent = get_object(params["parent"])
+
+    if child == parent:
+        raise ValueError(f"Cannot parent object '{child.name}' to itself.")
+
+    # Prevent circular parenting: check if child is an ancestor of parent
+    curr = parent.parent
+    while curr is not None:
+        if curr == child:
+            raise ValueError(
+                f"Cannot set '{parent.name}' as parent of '{child.name}': circular parenting detected ('{child.name}' is already an ancestor of '{parent.name}')."
+            )
+        curr = curr.parent
+
+    ensure_object_mode()
+
+    # Check if already parented to this parent
+    if child.parent == parent:
+        msg = f"Object '{child.name}' is already parented to '{parent.name}'"
+    else:
+        # Preserve world-space transform
+        orig_mw = child.matrix_world.copy()
+        child.parent = parent
+        child.matrix_parent_inverse = parent.matrix_world.inverted()
+        child.matrix_world = orig_mw
+        bpy.context.view_layer.update()
+        msg = f"Parented '{child.name}' to '{parent.name}'"
+
+    res = build_object_response(child, "set_parent", msg)
+    res["parent"] = parent.name
+    res["parent_location"] = [round(v, 4) for v in parent.location]
+    res["parent_rotation"] = [round(math.degrees(v), 4) for v in parent.rotation_euler]
+    res["parent_scale"] = [round(v, 4) for v in parent.scale]
+    return res
+
+
+def action_clear_parent(params: dict) -> dict:
+    child = get_object(params["name"])
+
+    ensure_object_mode()
+
+    prev_parent = child.parent
+    if prev_parent is None:
+        msg = f"Object '{child.name}' has no parent to clear"
+        prev_parent_name = None
+    else:
+        prev_parent_name = prev_parent.name
+        # Preserve world-space transform
+        orig_mw = child.matrix_world.copy()
+        child.parent = None
+        child.matrix_parent_inverse.identity()
+        child.matrix_world = orig_mw
+        bpy.context.view_layer.update()
+        msg = f"Cleared parent '{prev_parent_name}' from object '{child.name}'"
+
+    res = build_object_response(child, "clear_parent", msg)
+    res["parent"] = None
+    res["previous_parent"] = prev_parent_name
+    return res
 
 
 def action_add_bevel(params: dict) -> dict:
@@ -956,9 +1087,12 @@ ACTION_DISPATCH = {
     "set_scale": action_set_scale,
     "set_dimensions": action_set_dimensions,
     "apply_transform": action_apply_transform,
+    "set_origin": action_set_origin,
     "rename_object": action_rename_object,
     "delete_object": action_delete_object,
     "clear_scene": action_clear_scene,
+    "set_parent": action_set_parent,
+    "clear_parent": action_clear_parent,
     "add_bevel": action_add_bevel,
     "set_shade_smooth": action_set_shade_smooth,
     "apply_modifier": action_apply_modifier,
@@ -990,8 +1124,11 @@ OBJECT_MODE_REQUIRED_ACTIONS = {
     "set_scale",
     "set_dimensions",
     "apply_transform",
+    "set_origin",
     "delete_object",
     "clear_scene",
+    "set_parent",
+    "clear_parent",
     "add_bevel",
     "set_shade_smooth",
     "apply_modifier",

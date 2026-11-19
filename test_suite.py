@@ -199,6 +199,45 @@ def test_action_validation():
     assert acts[0]["smooth"] is False
     assert acts[0]["auto_smooth"] is False
 
+    # 8. Group 3C: Assembly Hierarchy & Origin Control validation
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_origin",
+        "name": "Box",
+        "origin_mode": "bottom"
+    })
+    assert ok, f"set_origin bottom validation failed: {err}"
+    assert acts[0]["origin_mode"] == "BOTTOM"
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_origin",
+        "name": "Box",
+        "mode": "center"
+    })
+    assert ok, f"set_origin center validation failed: {err}"
+    assert acts[0]["origin_mode"] == "CENTER"
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_origin",
+        "name": "Box",
+        "origin_mode": "TOP",
+        "mode": "top"
+    })
+    assert ok, f"set_origin top validation failed: {err}"
+    assert acts[0]["origin_mode"] == "TOP"
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "set_parent",
+        "name": "ChildBox",
+        "parent": "ParentBox"
+    })
+    assert ok, f"set_parent validation failed: {err}"
+
+    ok, err, acts = action_validator.validate_payload({
+        "action": "clear_parent",
+        "name": "ChildBox"
+    })
+    assert ok, f"clear_parent validation failed: {err}"
+
     print("  [PASSED] All action validation tests passed.")
 
 
@@ -583,6 +622,64 @@ def test_invalid_requests():
 
     ok, err, _ = action_validator.validate_payload({"action": "set_shade_smooth", "name": "Box", "angle": "30"})
     assert not ok and "greater than 0 and at most 180" in err
+
+    # Group 3C: Assembly Hierarchy & Origin Control invalid requests
+    # set_origin invalid tests
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "Box", "origin_mode": "SIDE"})
+    assert not ok and "Invalid origin mode" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "Box", "origin_mode": ""})
+    assert not ok and "non-empty string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "Box", "origin_mode": 123})
+    assert not ok and "non-empty string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "Box", "origin_mode": True})
+    assert not ok and "non-empty string" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "Box"})
+    assert not ok and "requires 'origin_mode'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "Box", "origin_mode": "BOTTOM", "mode": "TOP"})
+    assert not ok and "Conflicting values" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "Box", "origin_mode": "BOTTOM", "unknown_key": 1})
+    assert not ok and "Unrecognized parameter 'unknown_key'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_origin", "name": "   ", "origin_mode": "BOTTOM"})
+    assert not ok and "valid non-empty 'name'" in err
+
+    # set_parent invalid tests
+    ok, err, _ = action_validator.validate_payload({"action": "set_parent", "name": "Box", "parent": "Box"})
+    assert not ok and "Cannot parent object 'Box' to itself" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_parent", "name": "Box", "parent": ""})
+    assert not ok and "valid non-empty 'parent'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_parent", "name": "Box", "parent": 123})
+    assert not ok and "valid non-empty 'parent'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_parent", "name": "Box", "parent": True})
+    assert not ok and "valid non-empty 'parent'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_parent", "name": "Box"})
+    assert not ok and "valid non-empty 'parent'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_parent", "name": "", "parent": "Box"})
+    assert not ok and "valid non-empty 'name'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "set_parent", "name": "Child", "parent": "Parent", "unknown_key": 1})
+    assert not ok and "Unrecognized parameter 'unknown_key'" in err
+
+    # clear_parent invalid tests
+    ok, err, _ = action_validator.validate_payload({"action": "clear_parent", "name": ""})
+    assert not ok and "valid non-empty 'name'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "clear_parent", "name": 123})
+    assert not ok and "valid non-empty 'name'" in err
+
+    ok, err, _ = action_validator.validate_payload({"action": "clear_parent", "name": "Box", "unknown_key": 1})
+    assert not ok and "Unrecognized parameter 'unknown_key'" in err
 
     print("  [PASSED] All invalid requests correctly rejected.")
 
@@ -1615,6 +1712,351 @@ def test_blender_live_integration():
     assert res_fail_target["status"] == "error"
     assert ref_box_obj.select_get()
     assert bpy.context.view_layer.objects.active == ref_box_obj
+
+    # -----------------------------------------------------------------------
+    # Group 3C: Assembly Hierarchy & Origin Control live integration tests
+    # -----------------------------------------------------------------------
+    # 1. set_origin tests (BOTTOM, CENTER, TOP on unrotated and rotated objects)
+    res_orig_cube = blender_actions.execute_action({
+        "action": "create_cube",
+        "name": "OriginCube",
+        "size": 2.0,
+        "location": [2.0, 3.0, 4.0]
+    })
+    assert res_orig_cube["status"] == "success"
+    orig_cube_obj = bpy.data.objects["OriginCube"]
+    orig_world_verts_1 = [orig_cube_obj.matrix_world @ v.co for v in orig_cube_obj.data.vertices]
+
+    # Test BOTTOM: size=2 at z=4 means min Z is 3.0
+    res_orig_bottom = blender_actions.execute_action({
+        "action": "set_origin",
+        "name": "OriginCube",
+        "origin_mode": "BOTTOM"
+    })
+    assert res_orig_bottom["status"] == "success"
+    assert res_orig_bottom["origin_mode"] == "BOTTOM"
+    assert [round(v, 2) for v in orig_cube_obj.location] == [2.0, 3.0, 3.0]
+    # Verify visible geometry unchanged in world space
+    world_verts_after_bottom = [orig_cube_obj.matrix_world @ v.co for v in orig_cube_obj.data.vertices]
+    assert max((v1 - v2).length for v1, v2 in zip(orig_world_verts_1, world_verts_after_bottom)) < 1e-5
+
+    # Test TOP: max Z is 5.0
+    res_orig_top = blender_actions.execute_action({
+        "action": "set_origin",
+        "name": "OriginCube",
+        "mode": "top"
+    })
+    assert res_orig_top["status"] == "success"
+    assert res_orig_top["origin_mode"] == "TOP"
+    assert [round(v, 2) for v in orig_cube_obj.location] == [2.0, 3.0, 5.0]
+    world_verts_after_top = [orig_cube_obj.matrix_world @ v.co for v in orig_cube_obj.data.vertices]
+    assert max((v1 - v2).length for v1, v2 in zip(orig_world_verts_1, world_verts_after_top)) < 1e-5
+
+    # Test CENTER: center Z is 4.0
+    res_orig_center = blender_actions.execute_action({
+        "action": "set_origin",
+        "name": "OriginCube",
+        "origin_mode": "CENTER"
+    })
+    assert res_orig_center["status"] == "success"
+    assert res_orig_center["origin_mode"] == "CENTER"
+    assert [round(v, 2) for v in orig_cube_obj.location] == [2.0, 3.0, 4.0]
+    world_verts_after_center = [orig_cube_obj.matrix_world @ v.co for v in orig_cube_obj.data.vertices]
+    assert max((v1 - v2).length for v1, v2 in zip(orig_world_verts_1, world_verts_after_center)) < 1e-5
+
+    # Test Rotated object: rotate 45 deg around X, 30 deg around Y, scale (1, 2, 3)
+    blender_actions.execute_action({
+        "action": "set_rotation",
+        "name": "OriginCube",
+        "rotation": [45.0, 30.0, 0.0]
+    })
+    blender_actions.execute_action({
+        "action": "set_scale",
+        "name": "OriginCube",
+        "scale": [1.0, 2.0, 3.0]
+    })
+    orig_world_verts_rot = [orig_cube_obj.matrix_world @ v.co for v in orig_cube_obj.data.vertices]
+
+    for m in ["BOTTOM", "TOP", "CENTER"]:
+        res_m = blender_actions.execute_action({
+            "action": "set_origin",
+            "name": "OriginCube",
+            "origin_mode": m
+        })
+        assert res_m["status"] == "success"
+        verts_m = [orig_cube_obj.matrix_world @ v.co for v in orig_cube_obj.data.vertices]
+        diff_m = max((v1 - v2).length for v1, v2 in zip(orig_world_verts_rot, verts_m))
+        assert diff_m < 1e-5, f"Rotated origin mode {m} moved visible geometry (diff={diff_m})"
+
+    # Context & selection & cursor restoration for set_origin
+    init_cursor = [1.23, 4.56, 7.89]
+    bpy.context.scene.cursor.location = tuple(init_cursor)
+    res_ref_orig = blender_actions.execute_action({"action": "create_cube", "name": "OriginRefObj", "size": 1.0})
+    ref_orig_obj = bpy.data.objects["OriginRefObj"]
+    orig_cube_obj.select_set(False)
+    ref_orig_obj.select_set(True)
+    bpy.context.view_layer.objects.active = ref_orig_obj
+
+    res_orig_ctx = blender_actions.execute_action({
+        "action": "set_origin",
+        "name": "OriginCube",
+        "origin_mode": "BOTTOM"
+    })
+    assert res_orig_ctx["status"] == "success"
+    assert not orig_cube_obj.select_get(), "OriginCube must remain unselected"
+    assert ref_orig_obj.select_get(), "OriginRefObj must remain selected"
+    assert bpy.context.view_layer.objects.active == ref_orig_obj, "OriginRefObj must remain active"
+    assert [round(v, 2) for v in bpy.context.scene.cursor.location] == init_cursor, "3D cursor location must be restored"
+
+    # Invalid targets and modes
+    res_fail_target = blender_actions.execute_action({"action": "set_origin", "name": "NonExistentObj999", "origin_mode": "BOTTOM"})
+    assert res_fail_target["status"] == "error"
+    assert "not found" in res_fail_target["error"].lower()
+
+    res_fail_cam = blender_actions.execute_action({"action": "create_camera", "name": "OriginCam"})
+    res_fail_non_mesh = blender_actions.execute_action({"action": "set_origin", "name": "OriginCam", "origin_mode": "BOTTOM"})
+    assert res_fail_non_mesh["status"] == "error"
+    assert "not a mesh" in res_fail_non_mesh["error"].lower()
+
+    # 2. set_parent and clear_parent tests
+    # Create parent object with transform (location, rotation, scale)
+    blender_actions.execute_action({
+        "action": "create_cube",
+        "name": "HierarchyParent",
+        "location": [10.0, 20.0, 30.0],
+        "size": 2.0
+    })
+    blender_actions.execute_action({
+        "action": "set_rotation",
+        "name": "HierarchyParent",
+        "rotation": [0.0, 0.0, 45.0]
+    })
+    blender_actions.execute_action({
+        "action": "set_scale",
+        "name": "HierarchyParent",
+        "scale": [2.0, 2.0, 2.0]
+    })
+    parent_obj = bpy.data.objects["HierarchyParent"]
+
+    # Create child object with transform
+    blender_actions.execute_action({
+        "action": "create_cube",
+        "name": "HierarchyChild",
+        "location": [1.0, 2.0, 3.0],
+        "size": 1.0
+    })
+    blender_actions.execute_action({
+        "action": "set_rotation",
+        "name": "HierarchyChild",
+        "rotation": [30.0, 0.0, 0.0]
+    })
+    child_obj = bpy.data.objects["HierarchyChild"]
+
+    child_orig_mw = child_obj.matrix_world.copy()
+
+    # Call set_parent
+    res_sp = blender_actions.execute_action({
+        "action": "set_parent",
+        "name": "HierarchyChild",
+        "parent": "HierarchyParent"
+    })
+    assert res_sp["status"] == "success"
+    assert res_sp["parent"] == "HierarchyParent"
+    assert child_obj.parent == parent_obj
+
+    # Verify child world-space transform is preserved
+    diff_parenting = child_obj.matrix_world - child_orig_mw
+    max_parenting_diff = max(abs(x) for row in diff_parenting for x in row)
+    assert max_parenting_diff < 1e-5, f"Parenting altered child world transform (diff={max_parenting_diff})"
+
+    # Verify child follows parent: translate parent by +5 in X
+    blender_actions.execute_action({
+        "action": "set_location",
+        "name": "HierarchyParent",
+        "location": [15.0, 20.0, 30.0]
+    })
+    assert abs(child_obj.matrix_world.translation.x - (child_orig_mw.translation.x + 5.0)) < 1e-4
+
+    # Test already-parented behavior
+    res_sp_again = blender_actions.execute_action({
+        "action": "set_parent",
+        "name": "HierarchyChild",
+        "parent": "HierarchyParent"
+    })
+    assert res_sp_again["status"] == "success"
+    assert "already parented" in res_sp_again["message"].lower()
+
+    # Self-parenting rejection
+    res_self_p = blender_actions.execute_action({
+        "action": "set_parent",
+        "name": "HierarchyParent",
+        "parent": "HierarchyParent"
+    })
+    assert res_self_p["status"] == "error"
+    assert "itself" in res_self_p["error"].lower()
+
+    # Circular parenting rejection: Create child C of HierarchyChild, then try to parent HierarchyParent to C
+    blender_actions.execute_action({"action": "create_cube", "name": "HierarchyGrandChild", "size": 0.5})
+    blender_actions.execute_action({"action": "set_parent", "name": "HierarchyGrandChild", "parent": "HierarchyChild"})
+
+    res_circ = blender_actions.execute_action({
+        "action": "set_parent",
+        "name": "HierarchyParent",
+        "parent": "HierarchyGrandChild"
+    })
+    assert res_circ["status"] == "error"
+    assert "circular parenting" in res_circ["error"].lower()
+
+    # Missing objects handling
+    res_missing_c = blender_actions.execute_action({"action": "set_parent", "name": "GhostChild", "parent": "HierarchyParent"})
+    assert res_missing_c["status"] == "error"
+    res_missing_p = blender_actions.execute_action({"action": "set_parent", "name": "HierarchyChild", "parent": "GhostParent"})
+    assert res_missing_p["status"] == "error"
+
+    # Test clear_parent: world-space transform preservation
+    child_mw_before_clear = child_obj.matrix_world.copy()
+    res_cp = blender_actions.execute_action({
+        "action": "clear_parent",
+        "name": "HierarchyChild"
+    })
+    assert res_cp["status"] == "success"
+    assert child_obj.parent is None
+    diff_clear = child_obj.matrix_world - child_mw_before_clear
+    max_clear_diff = max(abs(x) for row in diff_clear for x in row)
+    assert max_clear_diff < 1e-5, f"Unparenting altered child world transform (diff={max_clear_diff})"
+
+    # Verify moving parent no longer affects unparented child
+    blender_actions.execute_action({
+        "action": "set_location",
+        "name": "HierarchyParent",
+        "location": [50.0, 50.0, 50.0]
+    })
+    diff_unaffected = child_obj.matrix_world - child_mw_before_clear
+    assert max(abs(x) for row in diff_unaffected for x in row) < 1e-5
+
+    # Safe clear_parent on object without parent
+    res_cp_no_parent = blender_actions.execute_action({
+        "action": "clear_parent",
+        "name": "HierarchyChild"
+    })
+    assert res_cp_no_parent["status"] == "success"
+    assert "no parent to clear" in res_cp_no_parent["message"].lower()
+
+    # Context isolation for parenting operations
+    ref_orig_obj.select_set(True)
+    bpy.context.view_layer.objects.active = ref_orig_obj
+    blender_actions.execute_action({"action": "set_parent", "name": "HierarchyGrandChild", "parent": "HierarchyParent"})
+    assert ref_orig_obj.select_get()
+    assert bpy.context.view_layer.objects.active == ref_orig_obj
+    blender_actions.execute_action({"action": "clear_parent", "name": "HierarchyGrandChild"})
+    assert ref_orig_obj.select_get()
+    assert bpy.context.view_layer.objects.active == ref_orig_obj
+
+    # 3. Non-uniformly scaled and rotated parent test (shear-free preservation)
+    import mathutils
+    blender_actions.execute_action({
+        "action": "create_cube",
+        "name": "NUParent1",
+        "location": [10.0, 20.0, 30.0],
+        "size": 2.0
+    })
+    blender_actions.execute_action({
+        "action": "set_rotation",
+        "name": "NUParent1",
+        "rotation": [25.0, 45.0, 60.0]
+    })
+    blender_actions.execute_action({
+        "action": "set_scale",
+        "name": "NUParent1",
+        "scale": [0.5, 2.0, 3.5]
+    })
+    nu_p1 = bpy.data.objects["NUParent1"]
+
+    blender_actions.execute_action({
+        "action": "create_cube",
+        "name": "NUParent2",
+        "location": [-5.0, 10.0, -15.0],
+        "size": 2.0
+    })
+    blender_actions.execute_action({
+        "action": "set_rotation",
+        "name": "NUParent2",
+        "rotation": [15.0, -30.0, 45.0]
+    })
+    blender_actions.execute_action({
+        "action": "set_scale",
+        "name": "NUParent2",
+        "scale": [1.8, 0.4, 2.5]
+    })
+    nu_p2 = bpy.data.objects["NUParent2"]
+
+    blender_actions.execute_action({
+        "action": "create_cube",
+        "name": "NUChild",
+        "location": [3.0, 7.0, 12.0],
+        "size": 1.0
+    })
+    blender_actions.execute_action({
+        "action": "set_rotation",
+        "name": "NUChild",
+        "rotation": [10.0, 80.0, 15.0]
+    })
+    blender_actions.execute_action({
+        "action": "set_scale",
+        "name": "NUChild",
+        "scale": [1.5, 0.8, 2.2]
+    })
+    nu_child = bpy.data.objects["NUChild"]
+    orig_nu_verts = [nu_child.matrix_world @ v.co for v in nu_child.data.vertices]
+
+    # Parent to NUParent1
+    res_nu_p1 = blender_actions.execute_action({
+        "action": "set_parent",
+        "name": "NUChild",
+        "parent": "NUParent1"
+    })
+    assert res_nu_p1["status"] == "success"
+    assert nu_child.parent == nu_p1
+    verts_p1 = [nu_child.matrix_world @ v.co for v in nu_child.data.vertices]
+    max_p1_diff = max((v1 - v2).length for v1, v2 in zip(orig_nu_verts, verts_p1))
+    assert max_p1_diff < 1e-4, f"Parenting to non-uniform parent distorted geometry (diff={max_p1_diff})"
+
+    # Reparent to NUParent2
+    res_nu_p2 = blender_actions.execute_action({
+        "action": "set_parent",
+        "name": "NUChild",
+        "parent": "NUParent2"
+    })
+    assert res_nu_p2["status"] == "success"
+    assert nu_child.parent == nu_p2
+    verts_p2 = [nu_child.matrix_world @ v.co for v in nu_child.data.vertices]
+    max_p2_diff = max((v1 - v2).length for v1, v2 in zip(orig_nu_verts, verts_p2))
+    assert max_p2_diff < 1e-4, f"Reparenting between non-uniform parents distorted geometry (diff={max_p2_diff})"
+
+    # Parent transform propagation: translate NUParent2 by +10 in Z
+    blender_actions.execute_action({
+        "action": "set_location",
+        "name": "NUParent2",
+        "location": [-5.0, 10.0, -5.0]
+    })
+    verts_moved = [nu_child.matrix_world @ v.co for v in nu_child.data.vertices]
+    diff_moved_z = [(v1.z - v0.z) for v0, v1 in zip(verts_p2, verts_moved)]
+    assert all(abs(dz - 10.0) < 1e-3 for dz in diff_moved_z), "Child must follow parent translation"
+
+    # Unparent NUChild
+    verts_before_unparent = [nu_child.matrix_world @ v.co for v in nu_child.data.vertices]
+    res_nu_un = blender_actions.execute_action({
+        "action": "clear_parent",
+        "name": "NUChild"
+    })
+    assert res_nu_un["status"] == "success"
+    assert nu_child.parent is None
+    # Verify matrix_parent_inverse was reset to identity
+    is_identity = all(round(nu_child.matrix_parent_inverse[i][j], 4) == (1.0 if i == j else 0.0) for i in range(4) for j in range(4))
+    assert is_identity, "matrix_parent_inverse must be reset to identity"
+    verts_after_unparent = [nu_child.matrix_world @ v.co for v in nu_child.data.vertices]
+    max_un_diff = max((v1 - v2).length for v1, v2 in zip(verts_before_unparent, verts_after_unparent))
+    assert max_un_diff < 1e-4, f"Unparenting non-uniform child distorted geometry (diff={max_un_diff})"
 
     # Clean up
     blender_actions.execute_action({"action": "clear_scene"})
