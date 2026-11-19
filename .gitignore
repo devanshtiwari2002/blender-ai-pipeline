@@ -1,1 +1,17 @@
+# Python virtual environment & bytecode cache (visible in your folder)
+venv/
+__pycache__/
+*.py[cod]
+
+# Environment variables / API keys (if you add any later)
 .env
+
+# Blender auto-saves & temporary files
+*.blend1
+*.blend2
+*.blend@
+
+# Optional: ignore generated test scenes or renders if you save them here
+# *.blend
+# *.mp4
+# *.png
