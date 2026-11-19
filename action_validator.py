@@ -1,6 +1,7 @@
 """Shared Action Validator for Blender AI Assistant.
 Runs in standard Python (venv) as well as inside Blender (no bpy dependency).
 """
+import math
 
 SUPPORTED_ACTIONS = {
     # Creation
@@ -45,32 +46,66 @@ VALID_RELATIONSHIPS = {"above", "below", "beside", "inside", "centred_on", "cent
 VALID_BESIDE_DIRECTIONS = {"+X", "-X", "+Y", "-Y", "RIGHT", "LEFT", "FRONT", "BACK"}
 VALID_ALIGNMENTS = {"center", "centre", "min", "max"}
 
+# Allowed keys for the 7 primitive creation actions (strict unknown parameter checking)
+PRIMITIVE_ALLOWED_KEYS = {
+    "create_cube": {"action", "name", "location", "color", "size", "dimensions", "width", "depth", "height"},
+    "create_cylinder": {"action", "name", "location", "color", "radius", "diameter", "height", "depth", "vertices"},
+    "create_sphere": {"action", "name", "location", "color", "radius", "diameter", "segments", "ring_count"},
+    "create_uv_sphere": {"action", "name", "location", "color", "radius", "diameter", "segments", "ring_count"},
+    "create_plane": {"action", "name", "location", "color", "size", "dimensions", "width", "depth"},
+    "create_cone": {"action", "name", "location", "color", "radius", "radius1", "radius_top", "radius2", "height", "depth", "vertices"},
+    "create_torus": {"action", "name", "location", "color", "major_radius", "minor_radius", "major_segments", "minor_segments"},
+}
+
+
+def _is_number(v):
+    """Check if value is a valid finite number, strictly rejecting booleans."""
+    if isinstance(v, bool):
+        return False
+    if not isinstance(v, (int, float)):
+        return False
+    if math.isnan(v) or math.isinf(v):
+        return False
+    return True
+
+
+def _is_positive_number(v):
+    return _is_number(v) and v > 0
+
+
+def _is_non_negative_number(v):
+    return _is_number(v) and v >= 0
+
+
+def _is_integer(v):
+    """Check if value is an actual integer, strictly rejecting booleans and floats."""
+    if isinstance(v, bool):
+        return False
+    return isinstance(v, int)
+
 
 def _validate_vec3(val, field_name="vector"):
     if not isinstance(val, (list, tuple)) or len(val) != 3:
         return False, f"Field '{field_name}' must be a list/tuple of 3 numbers [x, y, z]"
-    try:
-        [float(x) for x in val]
-    except (ValueError, TypeError):
-        return False, f"All elements in '{field_name}' must be numeric"
+    for x in val:
+        if not _is_number(x):
+            return False, f"All elements in '{field_name}' must be finite numbers (got {x!r})"
     return True, None
 
 
 def _validate_color(val):
     if not isinstance(val, (list, tuple)) or len(val) not in (3, 4):
         return False, "Color must be a list of 3 or 4 RGBA floats [r, g, b, (a)]"
-    try:
-        for c in val:
-            v = float(c)
-            if not (0.0 <= v <= 1.0):
-                return False, f"Color channel {v} out of range [0.0, 1.0]"
-    except (ValueError, TypeError):
-        return False, "All color channels must be numeric"
+    for c in val:
+        if not _is_number(c):
+            return False, f"All color channels must be numeric (got {c!r})"
+        if not (0.0 <= c <= 1.0):
+            return False, f"Color channel {c} out of range [0.0, 1.0]"
     return True, None
 
 
 def validate_single_action(action: dict):
-    """Validate a single action dictionary against strict schema."""
+    """Validate and normalize a single action dictionary against strict schema."""
     if not isinstance(action, dict):
         return False, "Action must be a JSON dictionary object"
 
@@ -81,35 +116,266 @@ def validate_single_action(action: dict):
     if act_type not in SUPPORTED_ACTIONS:
         return False, f"Unsupported action: '{act_type}'. Allowed: {sorted(list(SUPPORTED_ACTIONS))}"
 
-    # Object creation actions
-    if act_type in {"create_cube", "create_cylinder", "create_sphere", "create_uv_sphere", "create_plane", "create_cone", "create_torus"}:
+    # -------------------------------------------------------------------------
+    # Primitive Creation Actions
+    # -------------------------------------------------------------------------
+    if act_type in PRIMITIVE_ALLOWED_KEYS:
+        # 1. Strict unknown parameter rejection for primitives
+        allowed = PRIMITIVE_ALLOWED_KEYS[act_type]
+        for k in action.keys():
+            if k not in allowed:
+                return False, f"Unrecognized parameter '{k}' for action '{act_type}'. Allowed: {sorted(list(allowed))}"
+
+        # 2. Common location and color validation
         if "location" in action:
             ok, err = _validate_vec3(action["location"], "location")
             if not ok:
                 return False, err
-        if "size" in action:
-            try:
-                if float(action["size"]) <= 0:
-                    return False, "Parameter 'size' must be positive"
-            except (ValueError, TypeError):
-                return False, "Parameter 'size' must be numeric"
-        if "radius" in action or "radius1" in action:
-            r = action.get("radius", action.get("radius1"))
-            try:
-                if float(r) <= 0:
-                    return False, "Radius must be positive"
-            except (ValueError, TypeError):
-                return False, "Radius must be numeric"
-        if "depth" in action:
-            try:
-                if float(action["depth"]) <= 0:
-                    return False, "Depth must be positive"
-            except (ValueError, TypeError):
-                return False, "Depth must be numeric"
         if "color" in action:
             ok, err = _validate_color(action["color"])
             if not ok:
                 return False, err
+
+        # 3. Primitive-specific dimension and quality validation & alias normalization
+        if act_type == "create_cube":
+            if "size" in action:
+                if not _is_positive_number(action["size"]):
+                    return False, "Parameter 'size' must be a positive number"
+                action["size"] = float(action["size"])
+
+            has_dims = "dimensions" in action
+            has_w = "width" in action
+            has_d = "depth" in action
+            has_h = "height" in action
+
+            for dim_k, dim_val in [("width", action.get("width")), ("depth", action.get("depth")), ("height", action.get("height"))]:
+                if dim_val is not None and not _is_positive_number(dim_val):
+                    return False, f"Parameter '{dim_k}' must be a positive number"
+
+            if has_dims:
+                dims = action["dimensions"]
+                if not isinstance(dims, (list, tuple)) or len(dims) != 3:
+                    return False, "Parameter 'dimensions' must be a list/tuple of 3 positive numbers [width, depth, height]"
+                for i, d in enumerate(dims):
+                    if not _is_positive_number(d):
+                        return False, f"Element [{i}] of 'dimensions' must be a positive number"
+                action["dimensions"] = [float(d) for d in dims]
+
+                # Conflict checking if width/depth/height also passed
+                if has_w and abs(float(action["width"]) - action["dimensions"][0]) > 1e-5:
+                    return False, f"Conflicting parameters 'width' ({action['width']}) and 'dimensions[0]' ({action['dimensions'][0]})"
+                if has_d and abs(float(action["depth"]) - action["dimensions"][1]) > 1e-5:
+                    return False, f"Conflicting parameters 'depth' ({action['depth']}) and 'dimensions[1]' ({action['dimensions'][1]})"
+                if has_h and abs(float(action["height"]) - action["dimensions"][2]) > 1e-5:
+                    return False, f"Conflicting parameters 'height' ({action['height']}) and 'dimensions[2]' ({action['dimensions'][2]})"
+                action.pop("width", None)
+                action.pop("depth", None)
+                action.pop("height", None)
+            elif has_w or has_d or has_h:
+                base = action.get("size", 2.0)
+                w = float(action.pop("width", base))
+                d = float(action.pop("depth", base))
+                h = float(action.pop("height", base))
+                action["dimensions"] = [w, d, h]
+
+        elif act_type == "create_cylinder":
+            if "vertices" in action:
+                v = action["vertices"]
+                if not _is_integer(v) or not (3 <= v <= 256):
+                    return False, "Parameter 'vertices' must be an integer between 3 and 256"
+
+            has_r = "radius" in action
+            has_dia = "diameter" in action
+            if has_r and not _is_positive_number(action["radius"]):
+                return False, "Parameter 'radius' must be a positive number"
+            if has_dia and not _is_positive_number(action["diameter"]):
+                return False, "Parameter 'diameter' must be a positive number"
+
+            if has_r and has_dia:
+                r = float(action["radius"])
+                dia = float(action["diameter"])
+                if abs(r - (dia / 2.0)) > 1e-5:
+                    return False, f"Conflicting parameters 'radius' ({r}) and 'diameter' ({dia})"
+                action.pop("diameter")
+                action["radius"] = r
+            elif has_dia:
+                action["radius"] = float(action.pop("diameter")) / 2.0
+            elif has_r:
+                action["radius"] = float(action["radius"])
+
+            has_h = "height" in action
+            has_dep = "depth" in action
+            if has_h and not _is_positive_number(action["height"]):
+                return False, "Parameter 'height' must be a positive number"
+            if has_dep and not _is_positive_number(action["depth"]):
+                return False, "Parameter 'depth' must be a positive number"
+
+            if has_h and has_dep:
+                h = float(action["height"])
+                dep = float(action["depth"])
+                if abs(h - dep) > 1e-5:
+                    return False, f"Conflicting parameters 'height' ({h}) and 'depth' ({dep})"
+                action.pop("depth")
+                action["height"] = h
+            elif has_dep:
+                action["height"] = float(action.pop("depth"))
+            elif has_h:
+                action["height"] = float(action["height"])
+
+        elif act_type in {"create_sphere", "create_uv_sphere"}:
+            if "segments" in action:
+                s = action["segments"]
+                if not _is_integer(s) or not (3 <= s <= 256):
+                    return False, "Parameter 'segments' must be an integer between 3 and 256"
+            if "ring_count" in action:
+                rc = action["ring_count"]
+                if not _is_integer(rc) or not (3 <= rc <= 256):
+                    return False, "Parameter 'ring_count' must be an integer between 3 and 256"
+
+            has_r = "radius" in action
+            has_dia = "diameter" in action
+            if has_r and not _is_positive_number(action["radius"]):
+                return False, "Parameter 'radius' must be a positive number"
+            if has_dia and not _is_positive_number(action["diameter"]):
+                return False, "Parameter 'diameter' must be a positive number"
+
+            if has_r and has_dia:
+                r = float(action["radius"])
+                dia = float(action["diameter"])
+                if abs(r - (dia / 2.0)) > 1e-5:
+                    return False, f"Conflicting parameters 'radius' ({r}) and 'diameter' ({dia})"
+                action.pop("diameter")
+                action["radius"] = r
+            elif has_dia:
+                action["radius"] = float(action.pop("diameter")) / 2.0
+            elif has_r:
+                action["radius"] = float(action["radius"])
+
+        elif act_type == "create_plane":
+            if "size" in action:
+                if not _is_positive_number(action["size"]):
+                    return False, "Parameter 'size' must be a positive number"
+                action["size"] = float(action["size"])
+
+            has_dims = "dimensions" in action
+            has_w = "width" in action
+            has_d = "depth" in action
+
+            if has_w and not _is_positive_number(action["width"]):
+                return False, "Parameter 'width' must be a positive number"
+            if has_d and not _is_positive_number(action["depth"]):
+                return False, "Parameter 'depth' must be a positive number"
+
+            if has_dims:
+                dims = action["dimensions"]
+                if not isinstance(dims, (list, tuple)) or len(dims) != 2:
+                    return False, "Parameter 'dimensions' must be a list/tuple of 2 positive numbers [width, depth]"
+                for i, d in enumerate(dims):
+                    if not _is_positive_number(d):
+                        return False, f"Element [{i}] of 'dimensions' must be a positive number"
+                action["dimensions"] = [float(d) for d in dims]
+
+                if has_w and abs(float(action["width"]) - action["dimensions"][0]) > 1e-5:
+                    return False, f"Conflicting parameters 'width' ({action['width']}) and 'dimensions[0]' ({action['dimensions'][0]})"
+                if has_d and abs(float(action["depth"]) - action["dimensions"][1]) > 1e-5:
+                    return False, f"Conflicting parameters 'depth' ({action['depth']}) and 'dimensions[1]' ({action['dimensions'][1]})"
+                action.pop("width", None)
+                action.pop("depth", None)
+            elif has_w or has_d:
+                base = action.get("size", 2.0)
+                w = float(action.pop("width", base))
+                d = float(action.pop("depth", base))
+                action["dimensions"] = [w, d]
+
+        elif act_type == "create_cone":
+            if "vertices" in action:
+                v = action["vertices"]
+                if not _is_integer(v) or not (3 <= v <= 256):
+                    return False, "Parameter 'vertices' must be an integer between 3 and 256"
+
+            # radius vs radius1
+            has_r = "radius" in action
+            has_r1 = "radius1" in action
+            if has_r and not _is_positive_number(action["radius"]):
+                return False, "Parameter 'radius' must be a positive number"
+            if has_r1 and not _is_positive_number(action["radius1"]):
+                return False, "Parameter 'radius1' must be a positive number"
+
+            if has_r and has_r1:
+                r = float(action["radius"])
+                r1 = float(action["radius1"])
+                if abs(r - r1) > 1e-5:
+                    return False, f"Conflicting parameters 'radius' ({r}) and 'radius1' ({r1})"
+                action.pop("radius1")
+                action["radius"] = r
+            elif has_r1:
+                action["radius"] = float(action.pop("radius1"))
+            elif has_r:
+                action["radius"] = float(action["radius"])
+
+            # radius_top vs radius2 (allow 0.0 for pointed cone)
+            has_rt = "radius_top" in action
+            has_r2 = "radius2" in action
+            if has_rt and not _is_non_negative_number(action["radius_top"]):
+                return False, "Parameter 'radius_top' must be a non-negative number"
+            if has_r2 and not _is_non_negative_number(action["radius2"]):
+                return False, "Parameter 'radius2' must be a non-negative number"
+
+            if has_rt and has_r2:
+                rt = float(action["radius_top"])
+                r2 = float(action["radius2"])
+                if abs(rt - r2) > 1e-5:
+                    return False, f"Conflicting parameters 'radius_top' ({rt}) and 'radius2' ({r2})"
+                action.pop("radius2")
+                action["radius_top"] = rt
+            elif has_r2:
+                action["radius_top"] = float(action.pop("radius2"))
+            elif has_rt:
+                action["radius_top"] = float(action["radius_top"])
+
+            # height vs depth
+            has_h = "height" in action
+            has_dep = "depth" in action
+            if has_h and not _is_positive_number(action["height"]):
+                return False, "Parameter 'height' must be a positive number"
+            if has_dep and not _is_positive_number(action["depth"]):
+                return False, "Parameter 'depth' must be a positive number"
+
+            if has_h and has_dep:
+                h = float(action["height"])
+                dep = float(action["depth"])
+                if abs(h - dep) > 1e-5:
+                    return False, f"Conflicting parameters 'height' ({h}) and 'depth' ({dep})"
+                action.pop("depth")
+                action["height"] = h
+            elif has_dep:
+                action["height"] = float(action.pop("depth"))
+            elif has_h:
+                action["height"] = float(action["height"])
+
+        elif act_type == "create_torus":
+            if "major_segments" in action:
+                ms = action["major_segments"]
+                if not _is_integer(ms) or not (3 <= ms <= 256):
+                    return False, "Parameter 'major_segments' must be an integer between 3 and 256"
+            if "minor_segments" in action:
+                mis = action["minor_segments"]
+                if not _is_integer(mis) or not (3 <= mis <= 128):
+                    return False, "Parameter 'minor_segments' must be an integer between 3 and 128"
+
+            if "major_radius" in action:
+                if not _is_positive_number(action["major_radius"]):
+                    return False, "Parameter 'major_radius' must be a positive number"
+                action["major_radius"] = float(action["major_radius"])
+            if "minor_radius" in action:
+                if not _is_positive_number(action["minor_radius"]):
+                    return False, "Parameter 'minor_radius' must be a positive number"
+                action["minor_radius"] = float(action["minor_radius"])
+
+            maj = float(action.get("major_radius", 1.0))
+            min_r = float(action.get("minor_radius", 0.25))
+            if maj <= min_r:
+                return False, f"Parameter 'major_radius' ({maj}) must be greater than 'minor_radius' ({min_r})"
 
     # Transformations
     elif act_type == "set_location":
@@ -133,6 +399,10 @@ def validate_single_action(action: dict):
         ok, err = _validate_vec3(action.get(field), field)
         if not ok:
             return False, err
+        if act_type == "set_dimensions":
+            for d in action[field]:
+                if not _is_positive_number(d):
+                    return False, "All dimensions in 'set_dimensions' must be positive numbers"
 
     elif act_type == "rename_object":
         if not action.get("name") or not action.get("new_name"):

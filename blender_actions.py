@@ -44,6 +44,26 @@ def compute_world_bounds(obj):
     }
 
 
+def build_object_response(obj, action_name: str, message: str) -> dict:
+    """Standardized success payload for primitive creation and basic transformations."""
+    bounds = compute_world_bounds(obj)
+    return {
+        "status": "success",
+        "action": action_name,
+        "object": obj.name,
+        "message": message,
+        "location": [round(v, 4) for v in obj.location],
+        "rotation": [round(math.degrees(v), 4) for v in obj.rotation_euler],
+        "scale": [round(v, 4) for v in obj.scale],
+        "dimensions": [round(v, 4) for v in obj.dimensions],
+        "bounds": {
+            "min": bounds["min"],
+            "max": bounds["max"],
+            "center": bounds["center"]
+        }
+    }
+
+
 def action_create_cube(params: dict) -> dict:
     name = params.get("name", "Cube")
     location = [float(v) for v in params.get("location", [0, 0, 0])]
@@ -52,54 +72,78 @@ def action_create_cube(params: dict) -> dict:
     bpy.ops.mesh.primitive_cube_add(size=size, location=location)
     obj = bpy.context.active_object or bpy.context.object
     obj.name = name
+    actual_name = obj.name
+
+    if "dimensions" in params:
+        dims = [float(v) for v in params["dimensions"]]
+        obj.dimensions = tuple(dims)
 
     if "color" in params:
         action_set_material({
-            "name": name,
-            "material_name": f"{name}_Material",
+            "name": actual_name,
+            "material_name": f"{actual_name}_Material",
             "color": params["color"]
         })
 
-    return {"status": "success", "message": f"Created cube '{name}' at {location}", "object": name}
+    msg = f"Created cube '{actual_name}' at {location}"
+    return build_object_response(obj, "create_cube", msg)
 
 
 def action_create_cylinder(params: dict) -> dict:
     name = params.get("name", "Cylinder")
     location = [float(v) for v in params.get("location", [0, 0, 0])]
     radius = float(params.get("radius", 1.0))
-    depth = float(params.get("depth", 2.0))
+    height = float(params.get("height", params.get("depth", 2.0)))
+    vertices = int(params.get("vertices", 32))
 
-    bpy.ops.mesh.primitive_cylinder_add(radius=radius, depth=depth, location=location)
+    bpy.ops.mesh.primitive_cylinder_add(
+        radius=radius,
+        depth=height,
+        vertices=vertices,
+        location=location
+    )
     obj = bpy.context.active_object or bpy.context.object
     obj.name = name
+    actual_name = obj.name
 
     if "color" in params:
         action_set_material({
-            "name": name,
-            "material_name": f"{name}_Material",
+            "name": actual_name,
+            "material_name": f"{actual_name}_Material",
             "color": params["color"]
         })
 
-    return {"status": "success", "message": f"Created cylinder '{name}' at {location} (radius={radius}, depth={depth})", "object": name}
+    msg = f"Created cylinder '{actual_name}' at {location} (radius={radius}, height={height}, vertices={vertices})"
+    return build_object_response(obj, "create_cylinder", msg)
 
 
 def action_create_sphere(params: dict) -> dict:
     name = params.get("name", "Sphere")
     location = [float(v) for v in params.get("location", [0, 0, 0])]
     radius = float(params.get("radius", 1.0))
+    segments = int(params.get("segments", 32))
+    ring_count = int(params.get("ring_count", 16))
 
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=radius, location=location)
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        radius=radius,
+        segments=segments,
+        ring_count=ring_count,
+        location=location
+    )
     obj = bpy.context.active_object or bpy.context.object
     obj.name = name
+    actual_name = obj.name
 
     if "color" in params:
         action_set_material({
-            "name": name,
-            "material_name": f"{name}_Material",
+            "name": actual_name,
+            "material_name": f"{actual_name}_Material",
             "color": params["color"]
         })
 
-    return {"status": "success", "message": f"Created sphere '{name}' at {location} (radius={radius})", "object": name}
+    action_name = params.get("action", "create_sphere")
+    msg = f"Created sphere '{actual_name}' at {location} (radius={radius}, segments={segments}, ring_count={ring_count})"
+    return build_object_response(obj, action_name, msg)
 
 
 def action_create_plane(params: dict) -> dict:
@@ -110,28 +154,51 @@ def action_create_plane(params: dict) -> dict:
     bpy.ops.mesh.primitive_plane_add(size=size, location=location)
     obj = bpy.context.active_object or bpy.context.object
     obj.name = name
+    actual_name = obj.name
 
-    return {"status": "success", "message": f"Created plane '{name}' at {location} (size={size})", "object": name}
+    if "dimensions" in params:
+        dims = params["dimensions"]
+        obj.dimensions = (float(dims[0]), float(dims[1]), 0.0)
+
+    if "color" in params:
+        action_set_material({
+            "name": actual_name,
+            "material_name": f"{actual_name}_Material",
+            "color": params["color"]
+        })
+
+    msg = f"Created plane '{actual_name}' at {location} (size={size})"
+    return build_object_response(obj, "create_plane", msg)
 
 
 def action_create_cone(params: dict) -> dict:
     name = params.get("name", "Cone")
     location = [float(v) for v in params.get("location", [0, 0, 0])]
     radius = float(params.get("radius", params.get("radius1", 1.0)))
-    depth = float(params.get("depth", 2.0))
+    radius_top = float(params.get("radius_top", params.get("radius2", 0.0)))
+    height = float(params.get("height", params.get("depth", 2.0)))
+    vertices = int(params.get("vertices", 32))
 
-    bpy.ops.mesh.primitive_cone_add(radius1=radius, depth=depth, location=location)
+    bpy.ops.mesh.primitive_cone_add(
+        radius1=radius,
+        radius2=radius_top,
+        depth=height,
+        vertices=vertices,
+        location=location
+    )
     obj = bpy.context.active_object or bpy.context.object
     obj.name = name
+    actual_name = obj.name
 
     if "color" in params:
         action_set_material({
-            "name": name,
-            "material_name": f"{name}_Material",
+            "name": actual_name,
+            "material_name": f"{actual_name}_Material",
             "color": params["color"]
         })
 
-    return {"status": "success", "message": f"Created cone '{name}' at {location} (radius={radius}, depth={depth})", "object": name}
+    msg = f"Created cone '{actual_name}' at {location} (radius={radius}, radius_top={radius_top}, height={height}, vertices={vertices})"
+    return build_object_response(obj, "create_cone", msg)
 
 
 def action_create_torus(params: dict) -> dict:
@@ -139,44 +206,61 @@ def action_create_torus(params: dict) -> dict:
     location = [float(v) for v in params.get("location", [0, 0, 0])]
     major_radius = float(params.get("major_radius", 1.0))
     minor_radius = float(params.get("minor_radius", 0.25))
+    major_segments = int(params.get("major_segments", 48))
+    minor_segments = int(params.get("minor_segments", 12))
 
-    bpy.ops.mesh.primitive_torus_add(major_radius=major_radius, minor_radius=minor_radius, location=location)
+    bpy.ops.mesh.primitive_torus_add(
+        major_radius=major_radius,
+        minor_radius=minor_radius,
+        major_segments=major_segments,
+        minor_segments=minor_segments,
+        location=location
+    )
     obj = bpy.context.active_object or bpy.context.object
     obj.name = name
+    actual_name = obj.name
 
-    return {"status": "success", "message": f"Created torus '{name}' at {location}", "object": name}
+    if "color" in params:
+        action_set_material({
+            "name": actual_name,
+            "material_name": f"{actual_name}_Material",
+            "color": params["color"]
+        })
+
+    msg = f"Created torus '{actual_name}' at {location} (major_radius={major_radius}, minor_radius={minor_radius}, major_segments={major_segments}, minor_segments={minor_segments})"
+    return build_object_response(obj, "create_torus", msg)
 
 
 def action_set_location(params: dict) -> dict:
     obj = get_object(params["name"])
     loc = [float(v) for v in params["location"]]
     obj.location = tuple(loc)
-    bpy.context.view_layer.update()
-    return {"status": "success", "message": f"Set location of '{obj.name}' to {loc}", "object": obj.name}
+    msg = f"Set location of '{obj.name}' to {loc}"
+    return build_object_response(obj, "set_location", msg)
 
 
 def action_set_rotation(params: dict) -> dict:
     obj = get_object(params["name"])
     rot_deg = [float(v) for v in params["rotation"]]
     obj.rotation_euler = tuple(math.radians(v) for v in rot_deg)
-    bpy.context.view_layer.update()
-    return {"status": "success", "message": f"Set rotation of '{obj.name}' to {rot_deg} degrees", "object": obj.name}
+    msg = f"Set rotation of '{obj.name}' to {rot_deg} degrees"
+    return build_object_response(obj, "set_rotation", msg)
 
 
 def action_set_scale(params: dict) -> dict:
     obj = get_object(params["name"])
     scale = [float(v) for v in params["scale"]]
     obj.scale = tuple(scale)
-    bpy.context.view_layer.update()
-    return {"status": "success", "message": f"Set scale of '{obj.name}' to {scale}", "object": obj.name}
+    msg = f"Set scale of '{obj.name}' to {scale}"
+    return build_object_response(obj, "set_scale", msg)
 
 
 def action_set_dimensions(params: dict) -> dict:
     obj = get_object(params["name"])
     dims = [float(v) for v in params["dimensions"]]
     obj.dimensions = tuple(dims)
-    bpy.context.view_layer.update()
-    return {"status": "success", "message": f"Set dimensions of '{obj.name}' to {dims}", "object": obj.name}
+    msg = f"Set dimensions of '{obj.name}' to {dims}"
+    return build_object_response(obj, "set_dimensions", msg)
 
 
 def action_rename_object(params: dict) -> dict:
@@ -186,7 +270,8 @@ def action_rename_object(params: dict) -> dict:
         raise ValueError("Parameter 'new_name' cannot be empty")
     old_name = obj.name
     obj.name = new_name
-    return {"status": "success", "message": f"Renamed '{old_name}' to '{new_name}'", "object": new_name}
+    actual_name = obj.name
+    return {"status": "success", "action": "rename_object", "message": f"Renamed '{old_name}' to '{actual_name}'", "object": actual_name}
 
 
 def action_delete_object(params: dict) -> dict:
@@ -248,10 +333,46 @@ def action_apply_modifier(params: dict) -> dict:
     if mod_name not in obj.modifiers:
         raise ValueError(f"Modifier '{mod_name}' not found on object '{obj.name}'")
 
-    bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.modifier_apply(modifier=mod_name)
-    bpy.context.view_layer.update()
-    return {"status": "success", "message": f"Applied modifier '{mod_name}' on '{obj.name}'", "object": obj.name}
+    prev_active = getattr(bpy.context.view_layer.objects, "active", None)
+    prev_selected = list(getattr(bpy.context, "selected_objects", []))
+
+    try:
+        # Deselect other objects and ensure target is selected and active
+        for o in prev_selected:
+            if o != obj:
+                o.select_set(False)
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+
+        # Ensure object mode for modifier application
+        ensure_object_mode()
+
+        if hasattr(bpy.ops.object, "modifier_apply"):
+            if not bpy.ops.object.modifier_apply.poll():
+                raise RuntimeError(f"Cannot apply modifier '{mod_name}' on '{obj.name}': context poll failed.")
+            bpy.ops.object.modifier_apply(modifier=mod_name)
+        else:
+            raise RuntimeError("bpy.ops.object.modifier_apply operator not available.")
+
+        bpy.context.view_layer.update()
+    finally:
+        # Restore prior selection and active object
+        try:
+            for o in prev_selected:
+                if o and o.name in bpy.data.objects:
+                    o.select_set(True)
+            if prev_active and prev_active.name in bpy.data.objects:
+                bpy.context.view_layer.objects.active = prev_active
+        except Exception:
+            pass
+
+    return {
+        "status": "success",
+        "action": "apply_modifier",
+        "message": f"Applied modifier '{mod_name}' on '{obj.name}'",
+        "object": obj.name,
+        "modifier_name": mod_name
+    }
 
 
 def action_set_material(params: dict) -> dict:
