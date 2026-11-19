@@ -39,6 +39,8 @@ SUPPORTED_ACTIONS = {
     "verify_assembly",
 }
 
+MAX_ACTIONS_PER_REQUEST = 500
+
 VALID_RELATIONSHIPS = {"above", "below", "beside", "inside", "centred_on", "centered_on", "around"}
 VALID_BESIDE_DIRECTIONS = {"+X", "-X", "+Y", "-Y", "RIGHT", "LEFT", "FRONT", "BACK"}
 VALID_ALIGNMENTS = {"center", "centre", "min", "max"}
@@ -319,6 +321,9 @@ def validate_payload(payload):
 
     if not isinstance(action_list, list) or len(action_list) == 0:
         return False, "Action list is empty", None
+
+    if len(action_list) > MAX_ACTIONS_PER_REQUEST:
+        return False, f"Payload exceeds maximum allowed actions ({len(action_list)} > {MAX_ACTIONS_PER_REQUEST})", None
 
     for idx, act in enumerate(action_list):
         ok, err = validate_single_action(act)

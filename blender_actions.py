@@ -2,45 +2,14 @@
 Executed on Blender's main thread via bpy.app.timers.
 """
 import math
-import bpy
-import mathutils
+try:
+    import bpy
+    import mathutils
+except ImportError:
+    bpy = None
+    mathutils = None
 
-SUPPORTED_ACTIONS = {
-    # Creation
-    "create_cube",
-    "create_cylinder",
-    "create_sphere",
-    "create_uv_sphere",
-    "create_plane",
-    "create_cone",
-    "create_torus",
-    # Modification
-    "set_location",
-    "set_rotation",
-    "set_scale",
-    "set_dimensions",
-    "rename_object",
-    "delete_object",
-    "clear_scene",
-    # Geometry
-    "add_bevel",
-    "set_shade_smooth",
-    "apply_modifier",
-    # Materials
-    "set_material",
-    # Scene
-    "create_light",
-    "create_camera",
-    "set_background_color",
-    # Scene Awareness
-    "get_scene_info",
-    # Object-Relative Positioning & Assembly
-    "get_object_bounds",
-    "place_relative",
-    "align_objects",
-    "set_relative_scale",
-    "verify_assembly",
-}
+from action_validator import SUPPORTED_ACTIONS
 
 
 def get_object(name: str):
@@ -300,7 +269,11 @@ def action_set_material(params: dict) -> dict:
     if not mat:
         mat = bpy.data.materials.new(name=mat_name)
 
-    mat.use_nodes = True
+    if hasattr(mat, "use_nodes"):
+        try:
+            mat.use_nodes = True
+        except Exception:
+            pass
     mat.diffuse_color = tuple(color)
 
     if mat.node_tree:
@@ -721,18 +694,47 @@ ACTION_DISPATCH = {
 }
 
 
+# Actions requiring Blender to be in Object mode
+OBJECT_MODE_REQUIRED_ACTIONS = {
+    "create_cube",
+    "create_cylinder",
+    "create_sphere",
+    "create_uv_sphere",
+    "create_plane",
+    "create_cone",
+    "create_torus",
+    "delete_object",
+    "clear_scene",
+    "add_bevel",
+    "set_shade_smooth",
+    "apply_modifier",
+    "create_light",
+    "create_camera",
+}
+
+
+def ensure_object_mode():
+    """Ensure Blender is in OBJECT mode if currently in another mode."""
+    try:
+        if hasattr(bpy.context, "mode") and bpy.context.mode != 'OBJECT':
+            if hasattr(bpy.ops.object, "mode_set") and bpy.ops.object.mode_set.poll():
+                bpy.ops.object.mode_set(mode='OBJECT')
+    except Exception:
+        pass
+
+
 def execute_action(action: dict) -> dict:
     """Execute a single validated action on Blender's main thread."""
     act_type = action.get("action")
     if act_type not in ACTION_DISPATCH:
         return {"status": "error", "error": f"Unsupported action: '{act_type}'"}
 
+    if act_type in OBJECT_MODE_REQUIRED_ACTIONS:
+        ensure_object_mode()
+
     handler = ACTION_DISPATCH[act_type]
     try:
-        # Pre-action dependency graph update
-        bpy.context.view_layer.update()
         result = handler(action)
-        # Post-action dependency graph update
         bpy.context.view_layer.update()
         return result
     except Exception as exc:
@@ -745,8 +747,6 @@ def execute_action_list(actions: list) -> dict:
     has_error = False
 
     for idx, act in enumerate(actions):
-        # Update dependency graph before every action
-        bpy.context.view_layer.update()
         res = execute_action(act)
         res["index"] = idx
         res["action"] = act.get("action", "unknown")

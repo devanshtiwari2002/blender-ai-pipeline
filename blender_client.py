@@ -43,6 +43,11 @@ def send_action(payload):
     try:
         response = json.loads(raw_response)
         print("Blender response:\n", json.dumps(response, indent=2))
+        if isinstance(response, dict) and response.get("status") == "timeout":
+            state = response.get("state", "unknown")
+            print(f"[TIMEOUT WARNING] Server reported timeout (task state: {state}).")
+            if state == "running":
+                print("  [!] WARNING: The task was already actively running in Blender. Do NOT auto-retry.")
         return response
     except Exception:
         print("Blender response (raw):", raw_response)

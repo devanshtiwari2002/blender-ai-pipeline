@@ -217,6 +217,15 @@ def execute_pipeline(prompt_text: str):
         total = result.get("total_actions", len(results_list))
         print("-" * 72)
         print(f"[SUMMARY] {success_count}/{total} actions executed successfully.")
+    elif result.get("status") == "timeout":
+        state = result.get("state", "unknown")
+        print(f"[TIMEOUT WARNING] Blender request timed out (task state: {state}).")
+        if state == "running":
+            print("  [!] WARNING: The task was already actively running on the Blender main thread when the socket timed out.")
+            print("  [!] Do NOT automatically retry the request immediately, as partial execution may have occurred.")
+        elif state == "cancelled":
+            print("  [i] The task was cancelled in the queue before execution started.")
+        print(f"  Details: {result.get('error')}")
     else:
         print(f"[FATAL ERROR] Blender reported: {result.get('error', result)}")
 
@@ -224,13 +233,13 @@ def execute_pipeline(prompt_text: str):
     return result
 
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) > 1:
         user_prompt = " ".join(sys.argv[1:])
     else:
         if sys.stdin.isatty():
             try:
-                user_prompt = input(f"Enter prompt for Blender (Press Enter for default relative positioning test):\n> ").strip()
+                user_prompt = input("Enter prompt for Blender (Press Enter for default relative positioning test):\n> ").strip()
             except (EOFError, KeyboardInterrupt):
                 user_prompt = ""
         else:
@@ -244,3 +253,7 @@ if __name__ == "__main__":
     except Exception as err:
         print(f"\n[ERROR] {err}")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
